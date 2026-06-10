@@ -124,7 +124,7 @@ impl VoiceChannel {
                     stream_params.sample_rate as f32, 
                     Arc::new(SpectralPlans::new(
                         config.fft_size, 
-                        config.fft_step)))),
+                        config.fft_step())))),
                 Some(SpectralVoiceBuffer::new(buffer_options))
             )
         } else {

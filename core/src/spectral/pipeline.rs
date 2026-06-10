@@ -16,21 +16,31 @@ use super::SpectralPlans;
 )]
 pub struct SpectralConfig {
     pub fft_size: usize,
-    pub fft_step: usize,
+    pub overlap_percent: f32,
     /// Maximum number of simultaneous spectral voices.
     /// `None` means unlimited voices are accepted.
     pub max_voices: Option<usize>,
     pub enable_phase_fade_out: bool,
+    pub max_peaks_per_frame: usize, // New parameter to control the number of peaks retained per frame
 }
 
 impl Default for SpectralConfig {
     fn default() -> Self {
         Self {
             fft_size: 1024,
-            fft_step: 256,
+            overlap_percent: 0.75, // 75% overlap is common for good time-frequency resolution balance
             max_voices: Some(4 * 512),
             enable_phase_fade_out: true,
+            max_peaks_per_frame: 64,
         }
+    }
+}
+
+impl SpectralConfig {
+    // Convenience method to calculate the step size between FFT frames based on the overlap percentage, 
+    // as overlap percent between frames is more intuitive to specify than raw step size.
+    pub fn fft_step(&self) -> usize {
+        (self.fft_size as f32 * (1.0 - self.overlap_percent)).round() as usize
     }
 }
 
@@ -111,10 +121,10 @@ impl<T: Simd> SpectralPipeline<T> {
         }
     }
 
-    /// Generates one hop-length worth of output samples via spectral accumulation + IFFT + OLA.
+    /// Generates one step-length worth of output samples via spectral accumulation + IFFT + OLA.
     pub fn process_spectral_block(&mut self, active_voices: &mut [&mut dyn Voice]) {
         let fft_size = self.config.fft_size;
-        let fft_step = self.config.fft_step;
+        let fft_step = self.config.fft_step();
         let bin_count = fft_size / 2 + 1;
 
         // 1. Reset complex accumulator
@@ -127,17 +137,6 @@ impl<T: Simd> SpectralPipeline<T> {
         let mut groups: HashMap<SpectralGroupKey, Vec<&mut dyn Voice>> = HashMap::with_capacity(active_voices.len());
         for voice_ref in active_voices.iter_mut() {
             if let Some(spectral_voice) = voice_ref.as_spectral_voice_mut() {
-                debug_assert_eq!(
-                    spectral_voice.fft_size(), self.config.fft_size,
-                    "Voice FFT size {} does not match pipeline {}",
-                    spectral_voice.fft_size(), self.config.fft_size
-                );
-                debug_assert_eq!(
-                    spectral_voice.fft_step(), self.config.fft_step,
-                    "Voice FFT step {} does not match pipeline {}",
-                    spectral_voice.fft_step(), self.config.fft_step
-                );
-
                 spectral_voice.update_host_sample_rate(self.sample_rate);
                 let key = spectral_voice.spectral_group_key();
                 groups.entry(key).or_default().push(*voice_ref);
@@ -199,9 +198,9 @@ impl<T: Simd> SpectralPipeline<T> {
             self.overlap_buffer[i] += self.time_domain_scratch[i];
         }
 
-        // 8. Push exactly fft_step samples to the ring buffer — NOT fft_size.
+        // 8. Push exactly fft_step samples to the ring buffer.
         //    The remaining (fft_size - fft_step) samples stay in overlap_buffer to be
-        //    summed with the next frame. This is what makes OLA reconstruct correctly.
+        //    summed with the next frame for correct OLA reconstruction.
         self.ring_buffer.extend(self.overlap_buffer[..fft_step].iter().copied());
 
         // 9. Shift overlap buffer left by fft_step, zero the vacated tail.

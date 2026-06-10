@@ -49,9 +49,10 @@ fn criterion_benchmark(c: &mut Criterion) {
 
     let spectral_config = xsynth_core::spectral::SpectralConfig {
         fft_size: 1024,          // Standard FFT window sizing
-        fft_step: 256,             // 75% overlap for smooth phase tracking
+        overlap_percent: 0.75,   // 75% overlap for smooth phase tracking
         max_voices: Some(layer_count),
         enable_phase_fade_out: true,
+        max_peaks_per_frame: 16,
     };
 
     let soundfonts: Vec<Arc<dyn SoundfontBase>> = vec![Arc::new(

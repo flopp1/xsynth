@@ -89,13 +89,14 @@ pub extern "C" fn XSynth_ChannelGroup_Create(options: XSynth_GroupOptions) -> XS
         parallelism: convert_parallelism_to_rust(options.parallelism),
         spectral_config: unsafe { options.spectral_config.as_ref() }.map(|spec| SpectralConfig {
             fft_size: spec.fft_size,
-            fft_step: spec.fft_step,
+            overlap_percent: spec.overlap_percent,
             max_voices: if spec.max_voices == 0 {
                 None
             } else {
                 Some(spec.max_voices)
             },
             enable_phase_fade_out: spec.enable_phase_fade_out,
+            max_peaks_per_frame: spec.max_peaks_per_frame,
         }),
     };
 

@@ -121,9 +121,13 @@ impl State {
                 .long("fft-size")
                 .help("FFT window size for spectral processing. Must be a power of 2.\nDefault: 1024")
                 .value_parser(int_parser),
-            Arg::new("fft step")
-                .long("fft-step")
-                .help("Frame advance distance for overlap-add processing.\nDefault: 256")
+            Arg::new("overlap percent")
+                .long("overlap-percent")
+                .help("Temporal overlap percentage between FFT windows for spectral processing.\nDefault: 0.75")
+                .value_parser(float_parser),
+            Arg::new("max peaks per frame")
+                .long("max-peaks")
+                .help("Maximum number of peaks to retain per frame for spectral processing.\nDefault: 32")
                 .value_parser(int_parser),
         ])
     }
@@ -170,16 +174,21 @@ impl State {
             .copied()
             .unwrap_or(1024) as usize;
 
-        let fft_step = matches
-            .get_one::<u32>("fft step")
+        let overlap_percent = matches
+            .get_one::<f32>("overlap percent")
             .copied()
-            .unwrap_or(256) as usize;
+            .unwrap_or(0.75);
+
+        let max_peaks_per_frame = matches.get_one::<u32>("max peaks per frame")
+            .copied()
+            .unwrap_or(32) as usize;
         
         Some(SpectralConfig {
             fft_size,
-            fft_step,
+            overlap_percent: overlap_percent,
             max_voices: layer_limit,
             enable_phase_fade_out: disable_fade_out,
+            max_peaks_per_frame,
         })
     } else {
         None

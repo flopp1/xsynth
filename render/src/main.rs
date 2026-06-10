@@ -101,25 +101,43 @@ fn main() {
     let voices = Arc::new(AtomicU64::new(0));
 
     {
-        let position = position.clone();
+        let position = position.clone(); 
         let voices = voices.clone();
+        let mut start = std::time::Instant::now();
+        let mut last_pos = position.load(Ordering::Relaxed);
 
         thread::spawn(move || loop {
+            let now = std::time::Instant::now();
             let pos = position.load(Ordering::Relaxed);
             let progress = (pos / length) * 100.0 + 0.0004;
+
+            let dt = (now - start).as_secs_f64();
+            let dpos = pos - last_pos;
+
+            // seconds of file time processed per second of wall time
+            let speed = if dt > 0.0 { dpos / dt } else { 0.0 };
+
+            last_pos = pos;
+            start = now;
+
             print!("\rProgress: [");
             let bars = progress as u8 / 5;
+
             for _ in 0..bars {
                 print!("=");
             }
             for _ in 0..(20 - bars) {
                 print!(" ");
             }
+
             print!("] {progress:.3}% | ");
             print!("Voice Count: {}", voices.load(Ordering::Relaxed));
+            print!(" | Speed: {:.2}x RT", speed);
+
             for _ in 0..10 {
                 print!(" ");
             }
+
             if progress >= 100.0 {
                 println!();
                 break;

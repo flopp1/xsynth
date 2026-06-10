@@ -19,7 +19,8 @@ pub struct Settings {
     // Spectral pipeline options
     enable_spectral: bool,
     spectral_fft_size: usize,
-    spectral_fft_step: usize,
+    spectral_max_peaks_per_frame: usize,
+    overlap_percent: f32,
 }
 
 impl Default for Settings {
@@ -34,7 +35,8 @@ impl Default for Settings {
             ignore_range: 0..=0,
             enable_spectral: true,
             spectral_fft_size: 1024,
-            spectral_fft_step: 256,
+            spectral_max_peaks_per_frame: 32,
+            overlap_percent: 0.75,
         }
     }
 }
@@ -48,9 +50,10 @@ impl Settings {
         let spectral_config = if self.enable_spectral {
             Some(xsynth_core::spectral::SpectralConfig {
                 fft_size: self.spectral_fft_size,
-                fft_step: self.spectral_fft_step,
+                overlap_percent: self.overlap_percent,
                 max_voices: self.layers,
                 enable_phase_fade_out: self.fade_out_killing,
+                max_peaks_per_frame: self.spectral_max_peaks_per_frame,
             })
         } else {
             None

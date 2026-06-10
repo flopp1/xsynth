@@ -89,9 +89,10 @@ pub extern "C" fn XSynth_GenDefault_SoundfontOptions() -> XSynth_SoundfontOption
         use_spectral_analysis: true,
         spectral_config: XSynth_SpectralConfig {
             fft_size: 1024,
-            fft_step: 256,
+            overlap_percent: 0.75,
             max_voices: 1024,
             enable_phase_fade_out: true,
+            max_peaks_per_frame: 32,
         },
     }
 }
@@ -140,13 +141,14 @@ pub unsafe extern "C" fn XSynth_Soundfont_LoadNew(
             spectral_config: if options.use_spectral_analysis {
                 Some(xsynth_core::spectral::SpectralConfig {
                     fft_size: options.spectral_config.fft_size,
-                    fft_step: options.spectral_config.fft_step,
+                    overlap_percent: options.spectral_config.overlap_percent,
                     max_voices: if options.spectral_config.max_voices == 0 {
                         None
                     } else {
                         Some(options.spectral_config.max_voices)
                     },
                     enable_phase_fade_out: options.spectral_config.enable_phase_fade_out,
+                    max_peaks_per_frame: options.spectral_config.max_peaks_per_frame,
                 })
             } else {
                 None

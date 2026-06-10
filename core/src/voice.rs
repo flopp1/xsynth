@@ -56,14 +56,14 @@ pub trait SpectralVoiceSampleGenerator {
     fn fft_size(&self) -> usize;
     fn fft_step(&self) -> usize;
     fn update_host_sample_rate(&mut self, new_rate: f32);
-    fn accumulate_bins(
+    /*fn accumulate_bins(
         &mut self,
         shared_bins: &mut [Complex<f32>],
         velocity: u8,
         fft_size: usize,
         fft_step: usize,
         bin_count: usize,
-    );
+    );*/
 
     fn spectral_group_key(&self) -> SpectralGroupKey;
     fn spectral_generate_template(

@@ -172,7 +172,7 @@ impl SampleSoundfont {
 
         let spectral_config = options.spectral_config.unwrap_or_default();
 
-        let spectral_plans = SpectralPlans::new(spectral_config.fft_size, spectral_config.fft_step);
+        let spectral_plans = SpectralPlans::new(spectral_config.fft_size, spectral_config.fft_step());
 
         let mut spawner_params_list = Vec::<Vec<Arc<SampleVoiceSpawnerParams>>>::new();
         for _ in 0..(128 * 128) {
@@ -342,7 +342,7 @@ impl SampleSoundfont {
 
         let spectral_config = options.spectral_config.unwrap_or_default();
 
-        let spectral_plans = SpectralPlans::new(spectral_config.fft_size, spectral_config.fft_step);
+        let spectral_plans = SpectralPlans::new(spectral_config.fft_size, spectral_config.fft_step());
 
         for preset in presets {
             if let Some(bank) = options.bank {

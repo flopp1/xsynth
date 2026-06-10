@@ -33,9 +33,10 @@ pub fn main() {
 
     let spectral_config = xsynth_core::spectral::SpectralConfig {
         fft_size: 1024,          // Standard FFT window sizing
-        fft_step: 256,             // 75% overlap for smooth phase tracking
+        overlap_percent: 0.75,   // 75% overlap for smooth phase tracking
         max_voices: Some(layer_count),
         enable_phase_fade_out: true,
+        max_peaks_per_frame: 16, // Limit the number of peaks to retain per frame for performance
     };
 
     let soundfonts: Vec<Arc<dyn SoundfontBase>> = vec![Arc::new(
