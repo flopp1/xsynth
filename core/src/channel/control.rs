@@ -55,6 +55,7 @@ pub(super) struct ControlEventData {
     pub cutoff: Option<f32>,
     pub resonance: Option<f32>,
     pub expression: ValueLerp,
+    pub damper: bool,
 }
 
 impl ControlEventData {
@@ -75,6 +76,7 @@ impl ControlEventData {
             cutoff: None,
             resonance: None,
             expression: ValueLerp::new(1.0, sample_rate),
+            damper: false,
         }
     }
 }
@@ -164,15 +166,21 @@ impl VoiceChannel {
                     self.control_event_data.expression.set_end(expr);
                 }
                 0x40 => {
-                    // Damper / Sustain
                     let damper = match value {
                         0..=63 => false,
                         64..=127 => true,
                         _ => false,
                     };
+                    
+                    self.control_event_data.damper = damper;
 
                     for key in self.key_voices.iter_mut() {
                         key.data.set_damper(damper);
+                    }
+
+                    // Sync active spectral buffer right away if it exists
+                    if let Some(ref mut spectral_buffer) = self.spectral_voices {
+                        spectral_buffer.set_damper(damper);
                     }
                 }
                 0x47 => {

@@ -1,9 +1,8 @@
-use crate::{handles::*, utils::*, XSynth_GenDefault_StreamParams, XSynth_StreamParams};
+use crate::{XSynth_GenDefault_StreamParams, XSynth_StreamParams, XSynth_SpectralConfig, handles::*, utils::*};
+
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use xsynth_core::{
-    channel::{ChannelConfigEvent, ChannelEvent, ChannelInitOptions},
-    channel_group::{ChannelGroup, ChannelGroupConfig, SynthEvent},
-    AudioPipe,
+    AudioPipe, channel::{ChannelConfigEvent, ChannelEvent, ChannelInitOptions}, channel_group::{ChannelGroup, ChannelGroupConfig, SynthEvent}, spectral::SpectralConfig,
 };
 
 /// Options regarding which parts of the ChannelGroup should be multithreaded.
@@ -45,6 +44,7 @@ pub struct XSynth_GroupOptions {
     pub channels: u32,
     pub fade_out_killing: bool,
     pub parallelism: XSynth_ParallelismOptions,
+    pub spectral_config: *const XSynth_SpectralConfig,
 }
 
 /// Generates the default values for the XSynth_GroupOptions struct
@@ -60,6 +60,7 @@ pub extern "C" fn XSynth_GenDefault_GroupOptions() -> XSynth_GroupOptions {
         channels: 16,
         fade_out_killing: true,
         parallelism: XSynth_GenDefault_ParallelismOptions(),
+        spectral_config: std::ptr::null(),
     }
 }
 
@@ -86,6 +87,16 @@ pub extern "C" fn XSynth_ChannelGroup_Create(options: XSynth_GroupOptions) -> XS
         format: convert_synth_format(options.channels),
         audio_params: convert_streamparams_to_rust(options.stream_params),
         parallelism: convert_parallelism_to_rust(options.parallelism),
+        spectral_config: unsafe { options.spectral_config.as_ref() }.map(|spec| SpectralConfig {
+            fft_size: spec.fft_size,
+            fft_step: spec.fft_step,
+            max_voices: if spec.max_voices == 0 {
+                None
+            } else {
+                Some(spec.max_voices)
+            },
+            enable_phase_fade_out: spec.enable_phase_fade_out,
+        }),
     };
 
     match catch_unwind(AssertUnwindSafe(|| ChannelGroup::new(config))) {

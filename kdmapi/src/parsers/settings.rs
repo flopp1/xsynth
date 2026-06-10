@@ -15,6 +15,11 @@ pub struct Settings {
     render_window_ms: f64,
     multithreading: ThreadCount,
     ignore_range: RangeInclusive<u8>,
+
+    // Spectral pipeline options
+    enable_spectral: bool,
+    spectral_fft_size: usize,
+    spectral_fft_step: usize,
 }
 
 impl Default for Settings {
@@ -27,6 +32,9 @@ impl Default for Settings {
             render_window_ms: 10.0,
             multithreading: ThreadCount::None,
             ignore_range: 0..=0,
+            enable_spectral: true,
+            spectral_fft_size: 1024,
+            spectral_fft_step: 256,
         }
     }
 }
@@ -37,6 +45,16 @@ impl Settings {
     }
 
     pub fn get_synth_config(&self) -> XSynthRealtimeConfig {
+        let spectral_config = if self.enable_spectral {
+            Some(xsynth_core::spectral::SpectralConfig {
+                fft_size: self.spectral_fft_size,
+                fft_step: self.spectral_fft_step,
+                max_voices: self.layers,
+                enable_phase_fade_out: self.fade_out_killing,
+            })
+        } else {
+            None
+        };
         XSynthRealtimeConfig {
             channel_init_options: ChannelInitOptions {
                 fade_out_killing: self.fade_out_killing,
@@ -45,6 +63,7 @@ impl Settings {
             format: SynthFormat::Midi,
             multithreading: self.multithreading,
             ignore_range: self.ignore_range.clone(),
+            spectral_config,
         }
     }
 }

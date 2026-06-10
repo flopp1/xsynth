@@ -6,6 +6,7 @@ use xsynth_core::{
     channel_group::{ChannelGroupConfig, ParallelismOptions, SynthFormat, ThreadCount},
     soundfont::{EnvelopeCurveType, EnvelopeOptions, Interpolator, SoundfontInitOptions},
     AudioStreamParams, ChannelCount,
+    spectral::SpectralConfig,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -15,6 +16,8 @@ pub struct XSynthRenderConfig {
     pub sf_options: SoundfontInitOptions,
 
     pub use_limiter: bool,
+
+    pub spectral_config: Option<SpectralConfig>,
 }
 
 #[derive(Clone, Debug)]
@@ -38,17 +41,22 @@ impl State {
             Arg::new("midi")
                 .required(true)
                 .help("The path of the MIDI file to be converted."),
+                
+            // FIXED: Replaced ArgAction::Append with num_args(1..) 
+            // This tells clap to safely ingest all remaining trailing positions as a slice.
             Arg::new("soundfonts")
                 .required(true)
+                .num_args(1..) 
                 .help(
                     "Paths of the soundfonts to be used.\n\
                     Will be loaded in the order they are typed.",
-                )
-                .action(ArgAction::Append),
-            Arg::new("output").short('o').long("output").help(
-                "The path of the output audio file.\n\
-                Default: \"out.wav\"",
-            ),
+                ),
+                
+            Arg::new("output")
+                .short('o')
+                .long("output")
+                .help("The path of the output audio file.\nDefault: \"out.wav\""),
+
             Arg::new("sample rate")
                 .short('s')
                 .long("sample-rate")
@@ -105,6 +113,18 @@ impl State {
                     Default: \"linear\"",
                 )
                 .value_parser(interpolation_parser),
+            Arg::new("spectral")
+                .long("spectral")
+                .help("Enable frequency-domain spectral rendering instead of standard time-domain.")
+                .action(ArgAction::SetTrue),
+            Arg::new("fft size")
+                .long("fft-size")
+                .help("FFT window size for spectral processing. Must be a power of 2.\nDefault: 1024")
+                .value_parser(int_parser),
+            Arg::new("fft step")
+                .long("fft-step")
+                .help("Frame advance distance for overlap-add processing.\nDefault: 256")
+                .value_parser(int_parser),
         ])
     }
 
@@ -114,88 +134,117 @@ impl State {
     }
 
     fn from_matches(matches: &ArgMatches) -> Self {
-        let midi = matches
-            .get_one::<String>("midi")
-            .cloned()
-            .unwrap_or_default();
+    let midi = matches
+        .get_one::<String>("midi")
+        .cloned()
+        .unwrap_or_default();
 
-        let output = matches
-            .get_one::<String>("output")
-            .cloned()
-            .unwrap_or("out.wav".to_owned());
+    let output = matches
+        .get_one::<String>("output")
+        .cloned()
+        .unwrap_or_else(|| "out.wav".to_owned());
 
-        let soundfonts = matches
-            .get_many::<String>("soundfonts")
-            .unwrap_or_default()
-            .map(PathBuf::from)
-            .collect::<Vec<_>>();
+    let soundfonts = matches
+        .get_many::<String>("soundfonts")
+        .unwrap_or_default()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
 
-        let config = XSynthRenderConfig {
-            group_options: ChannelGroupConfig {
-                channel_init_options: ChannelInitOptions {
-                    fade_out_killing: matches
-                        .get_one("disable fade out voice killing")
-                        .copied()
-                        .unwrap_or(true),
-                },
-                format: SynthFormat::Midi,
-                audio_params: AudioStreamParams::new(
-                    matches.get_one("sample rate").copied().unwrap_or(48000),
-                    matches
-                        .get_one("audio channels")
-                        .copied()
-                        .unwrap_or(ChannelCount::Stereo),
-                ),
-                parallelism: ParallelismOptions {
-                    channel: matches
-                        .get_one("channel threading")
-                        .copied()
-                        .unwrap_or(ThreadCount::Auto),
-                    key: matches
-                        .get_one("key threading")
-                        .copied()
-                        .unwrap_or(ThreadCount::Auto),
-                },
+    // FIXED: Added explicit type annotation matching whatever your `layers_parser` outputs.
+    // Assuming layers_parser returns a usize or Option<usize>
+    let layer_limit = matches
+        .get_one::<Option<usize>>("layer limit")
+        .copied()
+        .unwrap_or(Some(32));
+
+    // FIXED: Action flags (SetTrue/SetFalse) must use .get_flag()
+    let disable_fade_out = matches.get_flag("disable fade out voice killing"); 
+    let linear_envelope = matches.get_flag("linear envelope");
+    let use_limiter = matches.get_flag("limiter");
+    let is_spectral = matches.get_flag("spectral");
+
+    let spectral_config = if is_spectral {
+        // Pull them out using <u32> to match your int_parser, then cast to usize
+        let fft_size = matches
+            .get_one::<u32>("fft size")
+            .copied()
+            .unwrap_or(1024) as usize;
+
+        let fft_step = matches
+            .get_one::<u32>("fft step")
+            .copied()
+            .unwrap_or(256) as usize;
+        
+        Some(SpectralConfig {
+            fft_size,
+            fft_step,
+            max_voices: layer_limit,
+            enable_phase_fade_out: disable_fade_out,
+        })
+    } else {
+        None
+    };
+
+    let config = XSynthRenderConfig {
+        group_options: ChannelGroupConfig {
+            channel_init_options: ChannelInitOptions {
+                fade_out_killing: disable_fade_out,
             },
-            sf_options: SoundfontInitOptions {
-                bank: None,
-                preset: None,
-                vol_envelope_options: if matches
-                    .get_one("linear envelope")
+            format: SynthFormat::Midi,
+            audio_params: AudioStreamParams::new(
+                matches.get_one::<u32>("sample rate").copied().unwrap_or(48000),
+                matches
+                    .get_one::<ChannelCount>("audio channels")
                     .copied()
-                    .unwrap_or_default()
-                {
-                    // EnvelopeCurveType is expressed in dB-space, so the
-                    // "linear in amplitude" CLI mode maps to exponential here.
-                    EnvelopeOptions {
-                        attack_curve: EnvelopeCurveType::Exponential,
-                        decay_curve: EnvelopeCurveType::Exponential,
-                        release_curve: EnvelopeCurveType::Exponential,
-                    }
-                } else {
-                    EnvelopeOptions {
-                        attack_curve: EnvelopeCurveType::Exponential,
-                        decay_curve: EnvelopeCurveType::Linear,
-                        release_curve: EnvelopeCurveType::Linear,
-                    }
-                },
-                use_effects: true,
-                interpolator: matches
-                    .get_one("interpolation")
+                    .unwrap_or(ChannelCount::Stereo),
+            ),
+            parallelism: ParallelismOptions {
+                channel: matches
+                    .get_one::<ThreadCount>("channel threading")
                     .copied()
-                    .unwrap_or(Interpolator::Linear),
+                    .unwrap_or(ThreadCount::Auto),
+                key: matches
+                    .get_one::<ThreadCount>("key threading")
+                    .copied()
+                    .unwrap_or(ThreadCount::Auto),
             },
-            use_limiter: matches.get_one("limiter").copied().unwrap_or_default(),
-        };
+            spectral_config: spectral_config.clone(),
+        },
+        sf_options: SoundfontInitOptions {
+            bank: None,
+            preset: None,
+            vol_envelope_options: if linear_envelope {
+                EnvelopeOptions {
+                    attack_curve: EnvelopeCurveType::Exponential,
+                    decay_curve: EnvelopeCurveType::Exponential,
+                    release_curve: EnvelopeCurveType::Exponential,
+                }
+            } else {
+                EnvelopeOptions {
+                    attack_curve: EnvelopeCurveType::Exponential,
+                    decay_curve: EnvelopeCurveType::Linear,
+                    release_curve: EnvelopeCurveType::Linear,
+                }
+            },
+            use_effects: true,
+            interpolator: matches
+                .get_one::<Interpolator>("interpolation")
+                .copied()
+                .unwrap_or(Interpolator::Linear),
+            spectral_config: spectral_config.clone(),
+        },
+        use_limiter,
+        spectral_config,
+    };
 
-        Self {
-            config,
-            layers: matches.get_one("layer limit").copied().unwrap_or(Some(32)),
-            midi: PathBuf::from(midi),
-            output: PathBuf::from(output),
-            soundfonts,
-        }
+    Self {
+        config,
+        layers: layer_limit,
+        midi: PathBuf::from(midi),
+        output: PathBuf::from(output),
+        soundfonts,
     }
+}
 }
 
 #[cfg(test)]

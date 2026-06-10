@@ -19,6 +19,7 @@ use super::{
     voice::{EnvelopeParameters, Voice},
 };
 use crate::{helpers::db_to_amp, voice::EnvelopeDescriptor, AudioStreamParams, ChannelCount};
+use crate::spectral::{AnalyzedSample, analyze_pcm_sample, SpectralPlans};
 
 pub use xsynth_soundfonts::{sf2::Sf2ParseError, sfz::SfzParseError};
 
@@ -33,6 +34,13 @@ pub use config::*;
 
 pub trait VoiceSpawner: Sync + Send {
     fn spawn_voice(&self, control: &VoiceControlData) -> Box<dyn Voice>;
+    
+    /// NEW: Extends the top-level definition to declare the spectral initialization hook.
+    /// Automatically drops back to standard time-domain generation by default for system stability.
+    fn spawn_spectral_voice(&self, control: &VoiceControlData) -> Box<dyn Voice> {
+        self.spawn_voice(control)
+    }
+    
     fn exclusive_class(&self) -> Option<u8> {
         None
     }
@@ -66,18 +74,22 @@ pub(super) struct LoopParams {
     pub stop: Option<u32>,
 }
 
-struct SampleVoiceSpawnerParams {
-    volume: f32,
-    pan: f32,
-    speed_mult: f32,
-    cutoff: Option<f32>,
-    resonance: f32,
-    filter_type: FilterType,
-    loop_params: LoopParams,
-    envelope: Arc<EnvelopeParameters>,
-    sample: Arc<[Arc<[f32]>]>,
-    interpolator: Interpolator,
-    exclusive_class: Option<u8>,
+pub(super) struct SampleVoiceSpawnerParams {
+    pub volume: f32,
+    pub pan: f32,
+    pub speed_mult: f32,
+    pub cutoff: Option<f32>,
+    pub resonance: f32,
+    pub filter_type: FilterType,
+    pub loop_params: LoopParams,
+    pub envelope: Arc<EnvelopeParameters>,
+    pub sample: Arc<[Arc<[f32]>]>,
+    pub interpolator: Interpolator,
+    pub exclusive_class: Option<u8>,
+    pub root_key: u8,
+    
+    /// NEW: The pre-analyzed frequency matrices used by your SpectralVoice<T> structure.
+    pub spectral_sample: Option<Arc<AnalyzedSample>>,
 }
 
 pub(super) struct SoundfontInstrument {
@@ -86,94 +98,11 @@ pub(super) struct SoundfontInstrument {
     spawner_params_list: Vec<Vec<Arc<SampleVoiceSpawnerParams>>>,
 }
 
-/// Represents a sample soundfont to be used within XSynth.
-///
-/// Supports SFZ and SF2 soundfonts.
-///
-/// ## SFZ specification support (opcodes)
-/// - `lovel` & `hivel`
-/// - `lokey` & `hikey`
-/// - `pitch_keycenter`
-/// - `volume`
-/// - `pan`
-/// - `sample`
-/// - `default_path`
-/// - `loop_mode`
-/// - `loop_start`
-/// - `loop_end`
-/// - `offset`
-/// - `cutoff`
-/// - `resonance`
-/// - `fil_veltrack`
-/// - `fil_keycenter`
-/// - `fil_keytrack`
-/// - `filter_type`
-/// - `tune`
-/// - `ampeg_start`
-/// - `ampeg_delay`
-/// - `ampeg_attack`
-/// - `ampeg_hold`
-/// - `ampeg_decay`
-/// - `ampeg_sustain`
-/// - `ampeg_release`
-///
-/// ## SF2 specification support
-/// ### Generators
-/// - `startAddrsOffset`
-/// - `endAddrsOffset`
-/// - `startloopAddrsOffset`
-/// - `endloopAddrsOffset`
-/// - `startAddrsCoarseOffset`
-/// - `endAddrsCoarseOffset`
-/// - `startloopAddrsCoarseOffset`
-/// - `endloopAddrsCoarseOffset`
-/// - `initialFilterFc`
-/// - `initialFilterQ`
-/// - `pan`
-/// - `delayVolEnv`
-/// - `attackVolEnv`
-/// - `holdVolEnv`
-/// - `decayVolEnv`
-/// - `sustainVolEnv`
-/// - `releaseVolEnv`
-/// - `instrument`
-/// - `keyRange`
-/// - `velRange`
-/// - `initialAttenuation`
-/// - `coarseTune`
-/// - `fineTune`
-/// - `sampleID`
-/// - `sampleModes`
-/// - `overridingRootKey`
-/// - `scaleTuning`
-/// - `exclusiveClass`
-/// - `keynum`
-/// - `velocity`
-/// - `keynumToVolEnvHold`
-/// - `keynumToVolEnvDecay`
-///
-/// ### Modulators
-/// XSynth intentionally supports a baked subset of SF2 modulators so note-on
-/// articulation can be resolved at soundfont load time without adding runtime
-/// voice stages. Currently supported:
-/// - sources: key number and note-on velocity
-/// - curves: linear, concave, convex, and switch
-/// - transforms: linear and absolute
-/// - destinations: attenuation, filter cutoff, pan, volume envelope timings,
-///   and static pitch offsets
-///
-/// The following SF2 features are intentionally not supported in the runtime
-/// engine because they would add significant hot-path and binary-size cost:
-/// - modulation envelope generators and destinations
-/// - modulation LFO / vibrato LFO generators and destinations
-/// - generic CC / aftertouch / pitch-wheel-driven SF2 modulators
-/// - chorus and reverb send behavior
 pub struct SampleSoundfont {
     instruments: Vec<SoundfontInstrument>,
     stream_params: AudioStreamParams,
 }
 
-/// Errors that can be generated when loading an SFZ soundfont.
 #[derive(Debug, Error)]
 pub enum LoadSfzError {
     #[error("IO Error")]
@@ -186,8 +115,6 @@ pub enum LoadSfzError {
     SfzParseError(#[from] SfzParseError),
 }
 
-/// Errors that can be generated when loading a soundfont
-/// of an unspecified format.
 #[derive(Debug, Error)]
 pub enum LoadSfError {
     #[error("Error loading the SFZ: {0}")]
@@ -201,15 +128,6 @@ pub enum LoadSfError {
 }
 
 impl SampleSoundfont {
-    /// Loads a new sample soundfont of an unspecified type.
-    /// The type of the soundfont will be determined from the file extension.
-    ///
-    /// Parameters:
-    /// - `path`: The path of the soundfont to be loaded.
-    /// - `stream_params`: Parameters of the output audio. See the `AudioStreamParams`
-    ///   documentation for the available options.
-    /// - `options`: The soundfont configuration. See the `SoundfontInitOptions`
-    ///   documentation for the available options.
     pub fn new(
         path: impl Into<PathBuf>,
         stream_params: AudioStreamParams,
@@ -231,14 +149,6 @@ impl SampleSoundfont {
         }
     }
 
-    /// Loads a new SFZ soundfont
-    ///
-    /// Parameters:
-    /// - `path`: The path of the SFZ soundfont to be loaded.
-    /// - `stream_params`: Parameters of the output audio. See the `AudioStreamParams`
-    ///   documentation for the available options.
-    /// - `options`: The soundfont configuration. See the `SoundfontInitOptions`
-    ///   documentation for the available options.
     pub fn new_sfz(
         sfz_path: impl Into<PathBuf>,
         stream_params: AudioStreamParams,
@@ -246,13 +156,11 @@ impl SampleSoundfont {
     ) -> Result<Self, LoadSfzError> {
         let regions = xsynth_soundfonts::sfz::parse_soundfont(sfz_path.into())?;
 
-        // Find the unique samples that we need to parse and convert
         let unique_sample_params: HashSet<_> = regions
             .iter()
             .map(sample_cache_from_region_params)
             .collect();
 
-        // Parse and convert them in parallel
         let samples: Result<HashMap<_, _>, _> = unique_sample_params
             .into_par_iter()
             .map(|params| -> Result<(_, _), LoadSfzError> {
@@ -262,20 +170,50 @@ impl SampleSoundfont {
             .collect();
         let samples = samples?;
 
-        // Generate region params
+        let spectral_config = options.spectral_config.unwrap_or_default();
+
+        let spectral_plans = SpectralPlans::new(spectral_config.fft_size, spectral_config.fft_step);
+
         let mut spawner_params_list = Vec::<Vec<Arc<SampleVoiceSpawnerParams>>>::new();
         for _ in 0..(128 * 128) {
             spawner_params_list.push(Vec::new());
         }
 
-        // Write region params
+        let mut spectral_cache: HashMap<SampleCache, Arc<AnalyzedSample>> = HashMap::new();
+
         for region in regions {
             let params = sample_cache_from_region_params(&region);
 
-            // Key value -1 is used for CC triggered regions which are not supported by XSynth
             if region.keyrange.contains(&-1) {
                 continue;
             }
+
+            let sample_rate = samples[&params].1;
+
+            let mut region_samples = samples[&params].0.clone();
+
+            // SF2 / SFZ: compute ONCE per region, before the key/vel loops
+            let spectral_sample = if options.spectral_config.is_some() {
+                Some(
+                    spectral_cache.entry(params.clone())
+                        .or_insert_with(|| {
+                            Arc::new(analyze_pcm_sample(region_samples.clone(), sample_rate, &spectral_config, &spectral_plans))
+                        })
+                        .clone(),
+                )
+            } else {
+                None
+            };
+
+            let sample = if spectral_sample.is_some() {
+                // spectral-only mode: drop the raw PCM reference after analysis to reduce memory
+                Arc::new([])
+            } else {
+                if stream_params.channels == ChannelCount::Stereo && region_samples.len() == 1 {
+                    region_samples = Arc::new([region_samples[0].clone(), region_samples[0].clone()]);
+                }
+                region_samples.clone()
+            };
 
             for key in region.keyrange.clone() {
                 for vel in region.velrange.clone() {
@@ -330,7 +268,7 @@ impl SampleSoundfont {
                     let vol_db = (region.volume as f32 + vol_db_add).clamp(-96.0, 12.0);
                     let volume = vol_mult * db_to_amp(vol_db);
 
-                    let sample_rate = samples[&params].1;
+                    
 
                     let loop_params = LoopParams {
                         mode: if region.loop_start == region.loop_end {
@@ -356,7 +294,6 @@ impl SampleSoundfont {
                         stop: None,
                     };
 
-                    let mut region_samples = samples[&params].0.clone();
                     if stream_params.channels == ChannelCount::Stereo && region_samples.len() == 1 {
                         region_samples =
                             Arc::new([region_samples[0].clone(), region_samples[0].clone()]);
@@ -372,8 +309,10 @@ impl SampleSoundfont {
                         filter_type: region.filter_type,
                         interpolator: options.interpolator,
                         loop_params,
-                        sample: region_samples,
+                        sample: sample.clone(),
                         exclusive_class: None,
+                        root_key: region.pitch_keycenter as u8,
+                        spectral_sample: spectral_sample.clone(),
                     });
 
                     spawner_params_list[index].push(spawner_params.clone());
@@ -391,14 +330,6 @@ impl SampleSoundfont {
         })
     }
 
-    /// Loads a new SF2 soundfont
-    ///
-    /// Parameters:
-    /// - `path`: The path of the SF2 soundfont to be loaded.
-    /// - `stream_params`: Parameters of the output audio. See the `AudioStreamParams`
-    ///   documentation for the available options.
-    /// - `options`: The soundfont configuration. See the `SoundfontInitOptions`
-    ///   documentation for the available options.
     pub fn new_sf2(
         sf2_path: impl Into<PathBuf>,
         stream_params: AudioStreamParams,
@@ -408,6 +339,10 @@ impl SampleSoundfont {
             xsynth_soundfonts::sf2::load_soundfont(sf2_path.into(), stream_params.sample_rate)?;
 
         let mut instruments = Vec::new();
+
+        let spectral_config = options.spectral_config.unwrap_or_default();
+
+        let spectral_plans = SpectralPlans::new(spectral_config.fft_size, spectral_config.fft_step);
 
         for preset in presets {
             if let Some(bank) = options.bank {
@@ -426,10 +361,37 @@ impl SampleSoundfont {
                 spawner_params_list.push(Vec::new());
             }
 
+            let mut spectral_cache: HashMap<*const [Arc<[f32]>], Arc<AnalyzedSample>> = HashMap::new();
+
             let mut unique_envelope_params =
                 Vec::<(EnvelopeDescriptor, Arc<EnvelopeParameters>)>::new();
 
             for region in preset.regions {
+                let sample_rate = region.sample_rate.clone();
+
+                let mut region_samples = region.sample.clone();
+
+                let key = Arc::as_ptr(&region_samples);
+
+                let spectral_sample = if options.spectral_config.is_some() {
+                    Some(spectral_cache.entry(key)
+                        .or_insert_with(|| {
+                            Arc::new(analyze_pcm_sample(region_samples.clone(), sample_rate, &spectral_config, &spectral_plans))
+                        })
+                        .clone())
+                } else {
+                    None
+                };
+
+                let sample = if spectral_sample.is_some() {
+                    Arc::new([])
+                } else {
+                    if stream_params.channels == ChannelCount::Stereo && region_samples.len() == 1 {
+                        region_samples = Arc::new([region_samples[0].clone(), region_samples[0].clone()]);
+                    }
+                    region_samples.clone()
+                };
+
                 for key in region.keyrange.clone() {
                     for vel in region.velrange.clone() {
                         let index = key_vel_to_index(key, vel);
@@ -483,10 +445,8 @@ impl SampleSoundfont {
                             end: region.loop_end,
                             stop: Some(region.sample_end),
                         };
-
-                        let mut region_samples = region.sample.clone();
-                        if stream_params.channels == ChannelCount::Stereo
-                            && region_samples.len() == 1
+                        
+                        if stream_params.channels == ChannelCount::Stereo && region_samples.len() == 1
                         {
                             region_samples =
                                 Arc::new([region_samples[0].clone(), region_samples[0].clone()]);
@@ -502,8 +462,10 @@ impl SampleSoundfont {
                             filter_type: FilterType::LowPass,
                             interpolator: options.interpolator,
                             loop_params,
-                            sample: region_samples,
+                            sample: sample.clone(),
                             exclusive_class: region.exclusive_class,
+                            root_key: region.root_key as u8,
+                            spectral_sample: spectral_sample.clone(),
                         });
 
                         spawner_params_list[index].push(spawner_params.clone());
@@ -544,8 +506,7 @@ impl SoundfontBase for SampleSoundfont {
         key: u8,
         vel: u8,
     ) -> Vec<Box<dyn VoiceSpawner>> {
-        use simdeez::*; // nuts
-
+        use simdeez::*;
         use simdeez::prelude::*;
 
         simd_runtime_generate!(

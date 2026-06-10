@@ -36,6 +36,16 @@ pub struct XSynth_StreamParams {
     pub audio_channels: u16,
 }
 
+#[repr(C)]
+pub struct XSynth_SpectralConfig {
+    pub fft_size: usize,
+    pub fft_step: usize,
+    /// Maximum number of simultaneous spectral voices.
+    /// If set to 0, spectral voice allocation is unlimited.
+    pub max_voices: usize,
+    pub enable_phase_fade_out: bool,
+}
+
 /// Generates the default values for the XSynth_StreamParams struct
 /// Default values are:
 /// - sample_rate = 44.1kHz

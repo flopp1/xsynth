@@ -1,4 +1,4 @@
-use crate::voice::{ReleaseType, VoiceControlData};
+use crate::voice::{ReleaseType, VoiceControlData, SpectralVoiceSampleGenerator};
 
 use super::{Voice, VoiceGeneratorBase, VoiceSampleGenerator};
 
@@ -20,6 +20,16 @@ impl<T: Send + Sync + VoiceSampleGenerator> VoiceBase<T> {
             velocity,
             exclusive_class,
         }
+    }
+
+    #[inline(always)]
+    pub fn sample_generator_mut(&mut self) -> &mut T {
+        &mut self.sample_generator
+    }
+
+    #[inline(always)]
+    pub fn velocity(&self) -> u8 {
+        self.velocity
     }
 }
 
@@ -55,12 +65,20 @@ where
     fn render_to(&mut self, buffer: &mut [f32]) {
         self.sample_generator.render_to(buffer)
     }
+
+    #[inline(always)]
+    fn as_spectral_voice_mut(&mut self) -> Option<&mut dyn SpectralVoiceSampleGenerator> {
+        self.sample_generator.as_spectral_voice_mut()
+    }
 }
 
 impl<T> Voice for VoiceBase<T>
 where
-    T: Send + Sync + VoiceSampleGenerator,
+    T: Send + Sync + VoiceSampleGenerator + 'static,
 {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
     #[inline(always)]
     fn is_releasing(&self) -> bool {
         self.releasing

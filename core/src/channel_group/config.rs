@@ -1,4 +1,5 @@
 use crate::{channel::ChannelInitOptions, AudioStreamParams};
+use crate::spectral::SpectralConfig;
 
 /// Controls the channel format that will be used in the synthesizer.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -51,6 +52,8 @@ pub enum ThreadCount {
 /// - However, per-key multithreading adds some overhead, so if the synth is invoked to
 ///   render very small sample counts each time (e.g. sub 1 millisecond), not using per-key
 ///   multithreading becomes more efficient.
+/// - NOTE: When `spectral_config` is activated, legacy per-key time-domain multithreading 
+///   is completely bypassed in favor of a centralized single-pass frequency summation layout.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(
     feature = "serde",
@@ -62,7 +65,7 @@ pub struct ParallelismOptions {
     /// thread count.
     pub channel: ThreadCount,
 
-    /// Render the individisual keys of each channel parallel in a threadpool
+    /// Render the individual keys of each channel parallel in a threadpool
     /// with the specified thread count.
     pub key: ThreadCount,
 }
@@ -91,6 +94,9 @@ impl Default for ParallelismOptions {
 pub struct ChannelGroupConfig {
     /// Channel initialization options (same for all channels).
     /// See the `ChannelInitOptions` documentation for more information.
+    /// 
+    /// *Note: If `spectral_config` is configured as `Some(_)`, the voice-killing
+    /// properties follow `spectral_config.enable_phase_fade_out` dynamically.*
     pub channel_init_options: ChannelInitOptions,
 
     /// Defines the format that the synthesizer will use. See the `SynthFormat`
@@ -106,4 +112,9 @@ pub struct ChannelGroupConfig {
     /// Options about the `ChannelGroup` instance's parallelism. See the `ParallelismOptions`
     /// documentation for more information.
     pub parallelism: ParallelismOptions,
+
+    /// Spectral configuration for the synthesizer. 
+    /// Supplying this option switches voice execution pipelines from individual time-domain keys
+    /// into a unified single-IFFT spectral allocation buffer.
+    pub spectral_config: Option<SpectralConfig>,
 }

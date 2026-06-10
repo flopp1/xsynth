@@ -33,34 +33,24 @@ pub(super) fn load_audio_file(
     stream_params: AudioStreamParams,
 ) -> Result<ProcessedSample, AudioLoadError> {
     let new_sample_rate = stream_params.sample_rate as f32;
-
     let extension = path.extension().and_then(|ext| ext.to_str());
-
     let file = Box::new(File::open(path)?);
 
-    // Create the media source stream using the boxed media source from above.
     let mss = MediaSourceStream::new(file, Default::default());
-
-    // Create a hint to help the format registry guess what format reader is appropriate.
     let mut hint = Hint::new();
     if let Some(extension) = extension {
         hint.with_extension(extension);
     }
 
-    // Use the default options when reading and decoding.
     let format_opts: FormatOptions = Default::default();
     let metadata_opts: MetadataOptions = Default::default();
     let decoder_opts: DecoderOptions = Default::default();
 
-    // Probe the media source stream for a format.
     let probed = symphonia::default::get_probe()
         .format(&hint, mss, &format_opts, &metadata_opts)
         .map_err(|x| AudioLoadError::AudioDecodingFailed(path.clone(), x))?;
 
-    // Get the format reader yielded by the probe operation.
     let mut format = probed.format;
-
-    // Get the default track.
     let track = format
         .default_track()
         .ok_or_else(|| AudioLoadError::NoTracks(path.clone()))?;
@@ -68,48 +58,38 @@ pub(super) fn load_audio_file(
     let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
     let channel_count = track.codec_params.channels.map(|c| c.count()).unwrap_or(1);
 
-    // Create a decoder for the track.
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &decoder_opts)
         .map_err(|x| AudioLoadError::AudioDecodingFailed(path.clone(), x))?;
 
-    // Store the track identifier, we'll use it to filter packets.
     let track_id = track.id;
-
-    // Builder for the parsed audio buffers
     let mut builder = BuilderVecs::new(channel_count);
 
     loop {
-        // Get the next packet from the format reader.
         let packet = match format.next_packet() {
             Err(symphonia::core::errors::Error::IoError(error))
                 if error.kind() == std::io::ErrorKind::UnexpectedEof =>
             {
-                // Audio source ended. Currently the lib has no cleaner way of detecting this.
                 break;
             }
             Err(error) => return Err(AudioLoadError::AudioDecodingFailed(path.clone(), error)),
             Ok(packet) => packet,
         };
 
-        // If the packet does not belong to the selected track, skip it.
         if packet.track_id() != track_id {
             continue;
         }
 
-        // Decode the packet into audio samples, ignoring any decode errors.
         match decoder.decode(&packet) {
             Ok(audio_buf) => {
                 builder.push(audio_buf);
             }
-
             Err(Error::DecodeError(_)) => (),
             Err(e) => return Err(AudioLoadError::AudioDecodingFailed(path.clone(), e)),
         }
     }
 
     let built = builder.finish(sample_rate as f32, new_sample_rate, stream_params.channels);
-
     Ok((built, sample_rate))
 }
 
@@ -123,7 +103,6 @@ impl BuilderVecs {
         for _ in 0..channels {
             vecs.push(Vec::new());
         }
-
         Self { vecs }
     }
 
@@ -144,7 +123,6 @@ impl BuilderVecs {
 
     fn push_buffer(&mut self, buffer: &AudioBuffer<impl Sample + IntoSample<f32>>) {
         let channels = buffer.spec().channels.count();
-
         for c in 0..channels {
             let channel = buffer.chan(c);
             self.vecs[c].reserve(channel.len());

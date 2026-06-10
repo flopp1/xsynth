@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use rand::Rng;
 use xsynth_core::{
     channel::{ChannelAudioEvent, ChannelConfigEvent, ChannelEvent, VoiceChannel},
-    soundfont::{SampleSoundfont, SoundfontBase},
+    soundfont::{EnvelopeCurveType, EnvelopeOptions, Interpolator, SampleSoundfont, SoundfontBase},
     AudioPipe, AudioStreamParams, ChannelCount,
 };
 
@@ -45,14 +45,39 @@ pub fn main() {
 
     println!("Loading soundfont...");
 
+    let layer_count = 512 * 4;
+
+    let spectral_config = xsynth_core::spectral::SpectralConfig {
+        fft_size: 1024,          // Standard FFT window sizing
+        fft_step: 256,             // 75% overlap for smooth phase tracking
+        max_voices: Some(layer_count),
+        enable_phase_fade_out: true,
+    };
+
     let soundfonts: Vec<Arc<dyn SoundfontBase>> = vec![Arc::new(
-        SampleSoundfont::new(sfz, stream_params, Default::default()).unwrap(),
+        SampleSoundfont::new(sfz, 
+                            stream_params, 
+                            xsynth_core::soundfont::SoundfontInitOptions {
+                                bank: None,
+                                preset: None,
+                                vol_envelope_options: EnvelopeOptions {
+                                    attack_curve: EnvelopeCurveType::Exponential,
+                                    decay_curve: EnvelopeCurveType::Exponential,
+                                    release_curve: EnvelopeCurveType::Exponential,
+                                },
+                                interpolator: Interpolator::Nearest,
+                                use_effects: false,
+                                spectral_config: Some(spectral_config),
+                            },
+        ).unwrap(),
     )];
 
     println!("Running benches");
 
     let make_new_channel = || {
-        let mut channel = VoiceChannel::new(Default::default(), stream_params, None);
+        let mut channel = VoiceChannel::new(Default::default(), 
+                                                            stream_params, 
+                                                            Some(spectral_config));
         channel.process_event(ChannelEvent::Config(ChannelConfigEvent::SetSoundfonts(
             soundfonts.clone(),
         )));

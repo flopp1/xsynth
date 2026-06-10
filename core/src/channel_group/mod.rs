@@ -25,6 +25,7 @@ pub struct ChannelGroup {
     sample_cache_vecs: Box<[Vec<f32>]>,
     channels: Box<[VoiceChannel]>,
     audio_params: AudioStreamParams,
+    //spectral_config: Option<SpectralConfig>,
 }
 
 impl ChannelGroup {
@@ -36,7 +37,7 @@ impl ChannelGroup {
         let mut sample_cache_vecs = Vec::new();
 
         // Thread pool for individual channels to split between keys
-        let channel_pool = match config.parallelism.key {
+        let _channel_pool = match config.parallelism.key {
             ThreadCount::None => None,
             ThreadCount::Auto => Some(Arc::new(rayon::ThreadPoolBuilder::new().build().unwrap())),
             ThreadCount::Manual(threads) => Some(Arc::new(
@@ -68,7 +69,7 @@ impl ChannelGroup {
             channels.push(VoiceChannel::new(
                 config.channel_init_options,
                 config.audio_params,
-                channel_pool.clone(),
+                config.spectral_config.clone(),
             ));
             channel_events_cache.push(Vec::new());
             sample_cache_vecs.push(Vec::new());
@@ -87,6 +88,7 @@ impl ChannelGroup {
             channels: channels.into_boxed_slice(),
             sample_cache_vecs: sample_cache_vecs.into_boxed_slice(),
             audio_params: config.audio_params,
+            //spectral_config: config.spectral_config,
         }
     }
 
@@ -245,6 +247,7 @@ mod tests {
                 channel: ThreadCount::None,
                 key: ThreadCount::None,
             },
+            spectral_config: None,
         });
 
         group.send_event(SynthEvent::Channel(

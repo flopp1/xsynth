@@ -1,6 +1,6 @@
 use std::{marker::PhantomData, ops::Mul, sync::Arc};
 
-use simdeez::Simd;
+use simdeez::{Simd, scalar::Scalar};
 
 use crate::{
     effects::BiQuadFilter,
@@ -24,6 +24,8 @@ use xsynth_soundfonts::LoopMode;
 
 use crate::soundfont::{Interpolator, LoopParams, SampleVoiceSpawnerParams, VoiceSpawner};
 
+use crate::spectral::{SpectralVoice, AnalyzedSample};
+
 pub struct MonoSampledVoiceSpawner<S: 'static + Simd + Send + Sync> {
     speed_mult: f32,
     filter: Option<BiQuadFilter>,
@@ -35,6 +37,8 @@ pub struct MonoSampledVoiceSpawner<S: 'static + Simd + Send + Sync> {
     exclusive_class: Option<u8>,
     vel: u8,
     stream_params: AudioStreamParams,
+    root_key: u8,
+    spectral_sample: Option<Arc<AnalyzedSample>>,
     _s: PhantomData<S>,
 }
 
@@ -66,12 +70,17 @@ impl<S: Simd + Send + Sync> MonoSampledVoiceSpawner<S> {
             exclusive_class: params.exclusive_class,
             vel,
             stream_params,
+            root_key: params.root_key,
+            spectral_sample: params.spectral_sample.clone(),
             _s: PhantomData,
         }
     }
 
     fn begin_voice(&self, control: &VoiceControlData) -> Box<dyn Voice> {
-        // Currently there's only the f32 buffer samples, more could be added in the future.
+        if self.samples.is_empty() {
+            return self.spawn_spectral_voice(control);
+        }
+
         #[allow(clippy::redundant_closure)]
         self.make_sample_reader(control, |s| BufferSamplers::new_f32(s))
     }
@@ -208,6 +217,47 @@ impl<S: Simd + Send + Sync> MonoSampledVoiceSpawner<S> {
 impl<S: 'static + Sync + Send + Simd> VoiceSpawner for MonoSampledVoiceSpawner<S> {
     fn spawn_voice(&self, control: &VoiceControlData) -> Box<dyn Voice> {
         self.begin_voice(control)
+    }
+    
+    fn spawn_spectral_voice(&self, control: &VoiceControlData) -> Box<dyn Voice> {
+        if let Some(ref spectral_sample) = self.spectral_sample {
+            
+            // FIXED: Integrated dynamic standard calculation logic for allow_release 
+            // to match structural requirements across execution loops.
+            let allow_release = self.loop_params.mode != LoopMode::OneShot;
+
+            let simd_envelope = SIMDVoiceEnvelope::<Scalar>::new(
+                *self.volume_envelope_params,
+                *self.volume_envelope_params,
+                allow_release,
+                self.stream_params.sample_rate as f32,
+            );
+            
+            let derived_trigger_note = (self.root_key as f32 
+                + 12.0 * self.speed_mult.log2())
+                .round() as u8;
+
+            // 1. Instantiate the inner spectral calculation voice core
+            let spectral_generator = SpectralVoice::<Scalar>::new(
+                spectral_sample.clone(),
+                simd_envelope,
+                self.root_key,
+                derived_trigger_note,
+                self.stream_params.sample_rate as f32, // Pass the actual numeric sample rate here!
+            );
+
+            // 2. Wrap it in VoiceBase to satisfy the `Voice` trait object boundary constraints
+            let boxed_voice: Box<dyn Voice> = Box::new(VoiceBase::new(
+                self.vel,
+                self.exclusive_class,
+                spectral_generator,
+            ));
+
+            // Now you can push `boxed_voice` straight into your pipeline voice list!
+            boxed_voice
+        } else {
+            self.spawn_voice(control)
+        }
     }
 
     fn exclusive_class(&self) -> Option<u8> {

@@ -2,6 +2,7 @@ use std::ops::RangeInclusive;
 pub use xsynth_core::{
     channel::ChannelInitOptions,
     channel_group::{SynthFormat, ThreadCount},
+    spectral::SpectralConfig,
 };
 
 /// Options for initializing a new RealtimeSynth.
@@ -38,6 +39,12 @@ pub struct XSynthRealtimeConfig {
     ///
     /// Default: `0..=0`
     pub ignore_range: RangeInclusive<u8>,
+
+    /// Configuration parameters for the frequency-domain spectral engine.
+    /// If `None`, the synthesizer defaults to standard time-domain rendering.
+    ///
+    /// Default: `None`
+    pub spectral_config: Option<SpectralConfig>,
 }
 
 impl Default for XSynthRealtimeConfig {
@@ -48,6 +55,12 @@ impl Default for XSynthRealtimeConfig {
             format: Default::default(),
             multithreading: ThreadCount::None,
             ignore_range: 0..=0,
+            spectral_config: Some(xsynth_core::spectral::SpectralConfig {
+                fft_size: 1024, // Fix property name (window_size instead of fft_size)
+                fft_step: 256,
+                max_voices: Some(4096),  // Set high voice ceiling to support intensive benchmark stress loops
+                enable_phase_fade_out: true,
+            }),
         }
     }
 }

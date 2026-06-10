@@ -29,3 +29,10 @@ midi-toolkit-rs = "0.1.0"
 atomic_float = "1.0.0"
 thiserror = "1.0.63"
 clap = { version = "4.5.16", features = ["cargo"] }
+hotpath = "0.16"
+tokio = "1.52.3"
+
+[features]
+hotpath = ["hotpath/hotpath"]
+hotpath-cpu = ["hotpath/hotpath-cpu"]
+hotpath-alloc = ["hotpath/hotpath-alloc"]

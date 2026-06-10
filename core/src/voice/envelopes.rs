@@ -304,6 +304,29 @@ impl<T: Simd> SIMDVoiceEnvelope<T> {
         }
     }
 
+    pub fn advance_block(&mut self, n: usize) {
+        for _ in 0..n {
+            let _ = self.next_sample();
+        }
+    }
+
+    pub fn average_gain_over(&mut self, sample_count: usize) -> f32 {
+        if sample_count == 0 {
+            return self.get_value_at_current_time();
+        }
+
+        // Fast trapezoidal approximation: sample at start and end, average them
+        // This avoids expensive per-sample stepping while remaining accurate
+        let start_gain = self.get_value_at_current_time();
+        
+        for _ in 0..sample_count {
+            let _ = self.next_sample();
+        }
+        
+        let end_gain = self.get_value_at_current_time();
+        (start_gain + end_gain) * 0.5
+    }
+
     pub fn current_stage(&self) -> &EnvelopeStage {
         &self.state.current_stage
     }

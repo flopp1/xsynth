@@ -14,6 +14,13 @@ fn voice_iter_from_vec<'a>(
     vec.iter().map(move |voice| voice.spawn_voice(control))
 }
 
+fn voice_iter_spectral_from_vec<'a>(
+    vec: &'a [Box<dyn VoiceSpawner>],
+    control: &'a VoiceControlData,
+) -> impl Iterator<Item = Box<dyn Voice>> + 'a {
+    vec.iter().map(move |voice| voice.spawn_spectral_voice(control))
+}
+
 fn exclusive_classes_from_vec<'a>(
     vec: &'a [Box<dyn VoiceSpawner>],
 ) -> impl Iterator<Item = u8> + 'a {
@@ -70,6 +77,16 @@ impl VoiceSpawnerMatrix {
     }
 
     #[inline(always)]
+    pub fn spawn_voices_attack_spectral<'a>(
+        &'a self,
+        control: &'a VoiceControlData,
+        key: u8,
+        vel: u8,
+    ) -> impl Iterator<Item = Box<dyn Voice>> + 'a {
+        voice_iter_spectral_from_vec(self.get_attack_spawners_vec_at(key, vel), control)
+    }
+
+    #[inline(always)]
     pub fn spawn_voices_release<'a>(
         &'a self,
         control: &'a VoiceControlData,
@@ -77,6 +94,16 @@ impl VoiceSpawnerMatrix {
         vel: u8,
     ) -> impl Iterator<Item = Box<dyn Voice>> + 'a {
         voice_iter_from_vec(self.get_release_spawners_vec_at(key, vel), control)
+    }
+
+    #[inline(always)]
+    pub fn spawn_voices_release_spectral<'a>(
+        &'a self,
+        control: &'a VoiceControlData,
+        key: u8,
+        vel: u8,
+    ) -> impl Iterator<Item = Box<dyn Voice>> + 'a {
+        voice_iter_spectral_from_vec(self.get_release_spawners_vec_at(key, vel), control)
     }
 
     #[inline(always)]

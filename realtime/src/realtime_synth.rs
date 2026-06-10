@@ -26,7 +26,7 @@ use xsynth_core::{
 };
 
 use crate::{
-    util::ReadWriteAtomicU64, RealtimeEventSender, SynthEvent, ThreadCount, XSynthRealtimeConfig,
+    util::ReadWriteAtomicU64, RealtimeEventSender, SynthEvent, XSynthRealtimeConfig,
 };
 
 #[derive(Debug, Error)]
@@ -193,7 +193,6 @@ impl RealtimeSynth {
     ) -> Result<Self, RealtimeSynthError> {
         let sample_rate = stream_config.sample_rate().0;
         let stream_params = AudioStreamParams::new(sample_rate, stream_config.channels().into());
-        let channel_pool = build_channel_pool(config.multithreading)?;
         let channel_count = channel_count(config.format);
 
         let PreparedRealtimeChannels {
@@ -206,8 +205,8 @@ impl RealtimeSynth {
             channel_count,
             config.channel_init_options,
             stream_params,
-            channel_pool,
             config.format,
+            config.spectral_config,
         )?;
 
         let stats = RealtimeSynthStats::new();
@@ -340,20 +339,6 @@ impl RealtimeSynth {
     }
 }
 
-fn build_channel_pool(
-    thread_count: ThreadCount,
-) -> Result<Option<Arc<rayon::ThreadPool>>, RealtimeSynthError> {
-    Ok(match thread_count {
-        ThreadCount::None => None,
-        ThreadCount::Auto => Some(Arc::new(rayon::ThreadPoolBuilder::new().build()?)),
-        ThreadCount::Manual(threads) => Some(Arc::new(
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .build()?,
-        )),
-    })
-}
-
 fn channel_count(format: SynthFormat) -> u32 {
     match format {
         SynthFormat::Midi => 16,
@@ -365,8 +350,8 @@ fn prepare_channels(
     channel_count: u32,
     init_options: xsynth_core::channel::ChannelInitOptions,
     stream_params: AudioStreamParams,
-    channel_pool: Option<Arc<rayon::ThreadPool>>,
     format: SynthFormat,
+    spectral_config: Option<xsynth_core::spectral::SpectralConfig>,
 ) -> Result<PreparedRealtimeChannels, RealtimeSynthError> {
     let (output_sender, output_receiver) = bounded::<Vec<f32>>(channel_count as usize);
 
@@ -376,7 +361,7 @@ fn prepare_channels(
     let mut join_handles = Vec::new();
 
     for _ in 0..channel_count {
-        let channel = VoiceChannel::new(init_options, stream_params, channel_pool.clone());
+        let channel = VoiceChannel::new(init_options, stream_params, spectral_config.clone());
         channel_stats.push(channel.get_channel_stats());
 
         let (event_sender, event_receiver) = unbounded();

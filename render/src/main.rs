@@ -1,3 +1,5 @@
+//#![feature(thread_id_value)]
+
 mod config;
 use config::*;
 
@@ -32,19 +34,34 @@ use std::{
 
 use atomic_float::AtomicF64;
 
+#[hotpath::main]
 fn main() {
+
     let state = State::from_args();
     let params = state.config.group_options.audio_params;
-    print!("Loading soundfonts...");
+
+    eprintln!("Loading soundfonts...");
+
     let soundfonts = state
-        .soundfonts
-        .iter()
-        .map(|s| {
-            let sf: Arc<dyn SoundfontBase> =
-                Arc::new(SampleSoundfont::new(s, params, state.config.sf_options).unwrap());
-            sf
-        })
-        .collect::<Vec<Arc<dyn SoundfontBase>>>();
+    .soundfonts
+    .iter()
+    .map(|s| {
+        // Print the file we are opening
+        //eprintln!("[DEBUG]: Initializing SampleSoundfont for: {:?}", s);
+        //eprintln!("[DEBUG]: FFT Size: {}, Hop Size: {}", 
+        //    state.config.spectral_config.as_ref().map(|c| c.fft_size).unwrap_or(0),
+        //    state.config.spectral_config.as_ref().map(|c| c.fft_size).unwrap_or(0)
+        //);
+
+        let sf: Arc<dyn SoundfontBase> =
+            Arc::new(SampleSoundfont::new(s, params, state.config.sf_options).unwrap());
+        
+        //eprintln!("[DEBUG]: Successfully loaded soundfont!");
+        sf
+    })
+    .collect::<Vec<Arc<dyn SoundfontBase>>>();
+
+    print!("soundfont initialised");
 
     let mut synth = OfflineWavRenderer::new(
         OfflineRenderConfig {
@@ -57,7 +74,7 @@ fn main() {
     )
     .unwrap();
 
-    println!(" done.");
+    print!(" done.");
 
     let length = get_midi_length(state.midi.to_str().unwrap());
 

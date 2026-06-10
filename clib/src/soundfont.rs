@@ -6,7 +6,7 @@ use std::{
 
 use xsynth_core::soundfont::{Interpolator, SampleSoundfont, SoundfontInitOptions};
 
-use crate::{consts::*, handles::*, utils::*, XSynth_GenDefault_StreamParams, XSynth_StreamParams};
+use crate::{consts::*, handles::*, utils::*, XSynth_GenDefault_StreamParams, XSynth_StreamParams, XSynth_SpectralConfig};
 
 /// Options for the curves of a specific envelope.
 /// - attack_curve: Controls the type of curve of the attack envelope stage.
@@ -65,6 +65,8 @@ pub struct XSynth_SoundfontOptions {
     pub vol_envelope_options: XSynth_EnvelopeOptions,
     pub use_effects: bool,
     pub interpolator: u16,
+    pub use_spectral_analysis: bool,
+    pub spectral_config: XSynth_SpectralConfig,
 }
 
 /// Generates the default values for the XSynth_SoundfontOptions struct
@@ -84,6 +86,13 @@ pub extern "C" fn XSynth_GenDefault_SoundfontOptions() -> XSynth_SoundfontOption
         vol_envelope_options: XSynth_GenDefault_EnvelopeOptions(),
         use_effects: true,
         interpolator: XSYNTH_INTERPOLATION_NEAREST,
+        use_spectral_analysis: true,
+        spectral_config: XSynth_SpectralConfig {
+            fft_size: 1024,
+            fft_step: 256,
+            max_voices: 1024,
+            enable_phase_fade_out: true,
+        },
     }
 }
 
@@ -127,6 +136,20 @@ pub unsafe extern "C" fn XSynth_Soundfont_LoadNew(
             interpolator: match options.interpolator {
                 XSYNTH_INTERPOLATION_LINEAR => Interpolator::Linear,
                 _ => Interpolator::Nearest,
+            },
+            spectral_config: if options.use_spectral_analysis {
+                Some(xsynth_core::spectral::SpectralConfig {
+                    fft_size: options.spectral_config.fft_size,
+                    fft_step: options.spectral_config.fft_step,
+                    max_voices: if options.spectral_config.max_voices == 0 {
+                        None
+                    } else {
+                        Some(options.spectral_config.max_voices)
+                    },
+                    enable_phase_fade_out: options.spectral_config.enable_phase_fade_out,
+                })
+            } else {
+                None
             },
         };
 

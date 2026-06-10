@@ -33,6 +33,54 @@ pub(crate) use control::*;
 mod cutoff;
 pub(crate) use cutoff::*;
 
+use rustfft::num_complex::Complex;
+use std::hash::Hash;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SpectralGroupKey {
+    pub sample_data_ptr: usize,
+    pub root_note: u8,
+    pub trigger_note: u8,
+    pub current_frame_bits: u32,
+    pub current_pitch_bend_bits: u32,
+    pub phase_signature: u64,
+}
+
+pub struct SpectralStateSnapshot {
+    pub current_frame: f32,
+    pub previous_phases: Vec<f32>,
+}
+
+/// Common interface for spectral voice generators.
+pub trait SpectralVoiceSampleGenerator {
+    fn fft_size(&self) -> usize;
+    fn fft_step(&self) -> usize;
+    fn update_host_sample_rate(&mut self, new_rate: f32);
+    fn accumulate_bins(
+        &mut self,
+        shared_bins: &mut [Complex<f32>],
+        velocity: u8,
+        fft_size: usize,
+        fft_step: usize,
+        bin_count: usize,
+    );
+
+    fn spectral_group_key(&self) -> SpectralGroupKey;
+    fn spectral_generate_template(
+        &mut self,
+        template_bins: &mut [Complex<f32>],
+        fft_size: usize,
+        fft_step: usize,
+        bin_count: usize,
+    );
+    fn spectral_copy_state_from(&mut self, source: &dyn SpectralVoiceSampleGenerator);
+    fn spectral_state_snapshot(&self) -> SpectralStateSnapshot;
+    fn spectral_apply_state_snapshot(&mut self, snapshot: &SpectralStateSnapshot);
+    fn spectral_advance_gain(&mut self, velocity: u8, fft_step: usize) -> f32;
+    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+}
+
 /// Options to modify the envelope of a voice.
 #[derive(Copy, Clone)]
 pub struct EnvelopeControlData {
@@ -85,9 +133,15 @@ pub trait VoiceGeneratorBase: Sync + Send {
 
 pub trait VoiceSampleGenerator: VoiceGeneratorBase {
     fn render_to(&mut self, buffer: &mut [f32]);
+    
+    fn as_spectral_voice_mut(&mut self) -> Option<&mut dyn SpectralVoiceSampleGenerator> {
+        None
+    }
 }
 
 pub trait Voice: VoiceSampleGenerator + Send + Sync {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+
     fn is_releasing(&self) -> bool;
     fn is_killed(&self) -> bool;
 

@@ -76,22 +76,6 @@ impl VolumeLimiter {
         &'a mut self,
         samples: T,
     ) -> VolumeLimiterIter<'a, 'b, T> {
-        impl<'b, T: 'b + Iterator<Item = f32>> Iterator for VolumeLimiterIter<'_, 'b, T> {
-            type Item = f32;
-
-            fn next(&mut self) -> Option<Self::Item> {
-                let next = self.samples.next();
-                if let Some(next) = next {
-                    let val =
-                        self.limiter.channels[self.pos % self.limiter.channel_count].limit(next);
-                    self.pos += 1;
-                    Some(val)
-                } else {
-                    None
-                }
-            }
-        }
-
         VolumeLimiterIter::<'a, 'b, T> {
             _b: PhantomData,
             limiter: self,
@@ -99,4 +83,25 @@ impl VolumeLimiter {
             pos: 0,
         }
     }
+
+
 }
+
+impl<'a, 'b, T: 'b + Iterator<Item = f32>> Iterator for VolumeLimiterIter<'a, 'b, T> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next = self.samples.next();
+        if let Some(next) = next {
+            let val = self
+                .limiter
+                .channels[self.pos % self.limiter.channel_count]
+                .limit(next);
+            self.pos += 1;
+            Some(val)
+        } else {
+            None
+        }
+    }
+}
+

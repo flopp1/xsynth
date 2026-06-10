@@ -29,6 +29,15 @@ pub fn main() {
 
     println!("Loading soundfont...");
 
+    let layer_count = 512 * 4;
+
+    let spectral_config = xsynth_core::spectral::SpectralConfig {
+        fft_size: 1024,          // Standard FFT window sizing
+        fft_step: 256,             // 75% overlap for smooth phase tracking
+        max_voices: Some(layer_count),
+        enable_phase_fade_out: true,
+    };
+
     let soundfonts: Vec<Arc<dyn SoundfontBase>> = vec![Arc::new(
         SampleSoundfont::new(
             sfz,
@@ -43,6 +52,7 @@ pub fn main() {
                 },
                 interpolator: Interpolator::Nearest,
                 use_effects: false,
+                spectral_config: Some(spectral_config),
             },
         )
         .unwrap(),
@@ -50,14 +60,13 @@ pub fn main() {
 
     println!("Initializing channel");
 
-    let layer_count = 512 * 4;
-
-    let threadpool = rayon::ThreadPoolBuilder::new().build().unwrap();
+    //let threadpool = rayon::ThreadPoolBuilder::new().build().unwrap();
 
     let mut channel = VoiceChannel::new(
         Default::default(),
         stream_params,
-        Some(Arc::new(threadpool)),
+        //Some(Arc::new(threadpool)),
+        Some(spectral_config)
     );
     channel.process_event(ChannelEvent::Config(ChannelConfigEvent::SetSoundfonts(
         soundfonts.clone(),
@@ -90,7 +99,7 @@ pub fn main() {
     println!("Render time: {} seconds", now.elapsed().as_secs_f64());
 
     // Calculate samples per second
-    let samples_rendered = layer_count * 127 * buffer.len() as u64 * loops * 2;
+    let samples_rendered = layer_count as u64 * 127 * buffer.len() as u64 * loops * 2;
     let seconds = now.elapsed().as_secs_f64();
     let samples_per_second = samples_rendered as f64 / seconds;
 

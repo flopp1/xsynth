@@ -20,3 +20,5 @@ pub mod effects;
 pub mod helpers;
 
 pub mod channel_group;
+
+pub mod spectral;

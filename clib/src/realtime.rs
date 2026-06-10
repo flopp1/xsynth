@@ -78,6 +78,7 @@ pub extern "C" fn XSynth_Realtime_Create(config: XSynth_RealtimeConfig) -> XSynt
         format: convert_synth_format(config.channels),
         multithreading: convert_threadcount(config.multithreading),
         ignore_range: config.ignore_range.start..=config.ignore_range.end,
+        spectral_config: None,
     };
 
     match RealtimeSynth::open_with_default_output(options) {
