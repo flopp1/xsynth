@@ -173,12 +173,35 @@ pub fn analyze_pcm_sample(
                 let mag = magnitudes[idx];
                 let mag_db = 20.0 * mag.max(MAG_FLOOR).log10();
                 let raw_freq = idx as f32 * delta_f;
-                let dynamic_threshold = -60.0 - 20.0 * (raw_freq / 1000.0).log10();
+                let freq_khz = (raw_freq.max(1.0)) / 1000.0;
+                let dynamic_threshold = -60.0 - 20.0 * freq_khz.log10();
+
+                // relax below 1kHz by up to +12 dB
+                let dynamic_threshold = if raw_freq < 1000.0 {
+                    dynamic_threshold + 12.0 * (1.0 - (raw_freq / 1000.0))
+                } else {
+                    dynamic_threshold
+                };
+
+                // clamp extremes
+                let dynamic_threshold = dynamic_threshold.clamp(-110.0, -30.0);
                 if mag_db < dynamic_threshold {
                     break;
                 }
 
-                let min_dist = (raw_freq * (semitone_ratio - 1.0)).max(delta_f * 1.5);
+                let semitone_dist = raw_freq * (semitone_ratio - 1.0);
+
+                // make bin floor smaller at low freq, larger at high freq
+                let bin_floor_multiplier = if raw_freq < 200.0 {
+                    0.6 // allow closer bins at very low freq
+                } else if raw_freq < 800.0 {
+                    0.9
+                } else {
+                    1.5
+                };
+                let bin_floor = delta_f * bin_floor_multiplier;
+
+                let min_dist = semitone_dist.max(bin_floor);
 
                 if selected_peaks.iter().any(|p| (p.frequency - raw_freq).abs() < min_dist) {
                     continue;

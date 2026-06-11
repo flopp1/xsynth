@@ -2859,6 +2859,7 @@ dependencies = [
  "criterion",
  "crossbeam-channel",
  "hotpath",
+ "hound",
  "lazy_static",
  "midi-toolkit-rs",
  "proc-macro2",

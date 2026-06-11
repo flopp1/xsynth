@@ -3,7 +3,6 @@ use simdeez::prelude::*;
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
 use std::sync::Arc;
-
 use super::SpectralPlans;
 use crate::voice::{SpectralGroupKey, Voice};
 
@@ -372,4 +371,87 @@ mod tests {
             concentration * 100.0
         );
     }
+
+    #[test]
+    fn test_dense_fft_ifft_roundtrip() {
+        use hound::{WavReader, WavWriter, WavSpec, SampleFormat};
+        use rustfft::num_complex::Complex;
+        use std::fs;
+
+        // Load a mono WAV
+        let mut reader = WavReader::open("C:\\Users\\ethen\\Downloads\\xsynth\\target\\release-with-debug\\input.wav").unwrap();
+        let spec = reader.spec();
+        assert_eq!(spec.channels, 1, "use mono samples for test");
+
+        let samples: Vec<f32> = match spec.sample_format {
+            SampleFormat::Int => {
+                match spec.bits_per_sample {
+                    16 => reader.samples::<i16>()
+                        .map(|s| s.unwrap() as f32 / i16::MAX as f32)
+                        .collect(),
+                    24 | 32 => reader.samples::<i32>()
+                        .map(|s| s.unwrap() as f32 / i32::MAX as f32)
+                        .collect(),
+                    _ => panic!("unsupported int bit depth: {}", spec.bits_per_sample),
+                }
+            }
+            SampleFormat::Float => {
+                reader.samples::<f32>().map(|s| s.unwrap()).collect()
+            }
+        };
+
+
+        // FFT setup
+        let fft_size = 32768;
+        let fft_step = 2048;
+        let plans = crate::spectral::SpectralPlans::new(fft_size, fft_step);
+
+        // Output buffer
+        let mut output = vec![0.0f32; samples.len()];
+        let mut fft_buffer = vec![Complex::new(0.0, 0.0); fft_size];
+
+        // Frame loop: full FFT/IFFT, no peak selection
+        for frame_idx in 0..((samples.len() - fft_size) / fft_step) {
+            let start = frame_idx * fft_step;
+            for i in 0..fft_size {
+                fft_buffer[i].re = samples[start + i] * plans.window()[i];
+                fft_buffer[i].im = 0.0;
+            }
+
+            plans.execute_forward(&mut fft_buffer);
+
+            // Mirror for real IFFT
+            for bin in 1..fft_size/2 {
+                fft_buffer[fft_size - bin] = fft_buffer[bin].conj();
+            }
+
+            plans.execute_inverse(&mut fft_buffer);
+
+            let scale = 1.0 / fft_size as f32;
+            for i in 0..fft_size {
+                let pos = start + i;
+                if pos < output.len() {
+                    output[pos] += fft_buffer[i].re * scale;
+                }
+            }
+        }
+
+        // Write out reconstructed WAV
+        let out_spec = WavSpec {
+            channels: 1,
+            sample_rate: spec.sample_rate,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+        let mut writer = WavWriter::create("C:\\Users\\ethen\\Downloads\\xsynth\\target\\release-with-debug\\output.wav", out_spec).unwrap();
+        for s in output {
+            let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+            writer.write_sample(v).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        // Manual check: listen to dense_roundtrip.wav — should sound identical to input.wav
+        assert!(fs::metadata("C:\\Users\\ethen\\Downloads\\xsynth\\target\\release-with-debug\\output.wav").is_ok());
+    }
+
 }
