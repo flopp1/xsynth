@@ -32,8 +32,8 @@ pub fn main() {
     let layer_count = 512 * 4;
 
     let spectral_config = xsynth_core::spectral::SpectralConfig {
-        fft_size: 1024,          // Standard FFT window sizing
-        overlap_percent: 0.75,   // 75% overlap for smooth phase tracking
+        fft_size: 8192, // Standard FFT window sizing
+        fft_step: 2048, // 75% overlap for smooth phase tracking
         max_voices: Some(layer_count),
         enable_phase_fade_out: true,
         max_peaks_per_frame: 16, // Limit the number of peaks to retain per frame for performance
@@ -67,7 +67,7 @@ pub fn main() {
         Default::default(),
         stream_params,
         //Some(Arc::new(threadpool)),
-        Some(spectral_config)
+        Some(spectral_config),
     );
     channel.process_event(ChannelEvent::Config(ChannelConfigEvent::SetSoundfonts(
         soundfonts.clone(),

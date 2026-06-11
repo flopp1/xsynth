@@ -171,7 +171,7 @@ impl VoiceChannel {
                         64..=127 => true,
                         _ => false,
                     };
-                    
+
                     self.control_event_data.damper = damper;
 
                     for key in self.key_voices.iter_mut() {

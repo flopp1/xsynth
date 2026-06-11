@@ -49,6 +49,7 @@ pub struct SpectralGroupKey {
 pub struct SpectralStateSnapshot {
     pub current_frame: f32,
     pub previous_phases: Vec<f32>,
+    pub last_pitch_ratio: f32,
 }
 
 /// Common interface for spectral voice generators.
@@ -133,7 +134,7 @@ pub trait VoiceGeneratorBase: Sync + Send {
 
 pub trait VoiceSampleGenerator: VoiceGeneratorBase {
     fn render_to(&mut self, buffer: &mut [f32]);
-    
+
     fn as_spectral_voice_mut(&mut self) -> Option<&mut dyn SpectralVoiceSampleGenerator> {
         None
     }

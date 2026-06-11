@@ -318,11 +318,11 @@ impl<T: Simd> SIMDVoiceEnvelope<T> {
         // Fast trapezoidal approximation: sample at start and end, average them
         // This avoids expensive per-sample stepping while remaining accurate
         let start_gain = self.get_value_at_current_time();
-        
+
         for _ in 0..sample_count {
             let _ = self.next_sample();
         }
-        
+
         let end_gain = self.get_value_at_current_time();
         (start_gain + end_gain) * 0.5
     }
@@ -715,4 +715,19 @@ mod tests {
 
         run();
     }
+}
+
+#[cfg(test)]
+pub(crate) fn make_sustained_envelope<S: Simd>(sample_rate: u32) -> SIMDVoiceEnvelope<S> {
+    let descriptor = EnvelopeDescriptor {
+        start_percent: 1.0,
+        delay: 0.0,
+        attack: 0.0,
+        hold: 0.0,
+        decay: 0.0,
+        sustain_percent: 1.0,
+        release: 1.0,
+    };
+    let params = descriptor.to_envelope_params(sample_rate, Default::default());
+    SIMDVoiceEnvelope::<S>::new(params, params, true, sample_rate as f32)
 }

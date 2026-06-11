@@ -39,12 +39,6 @@ pub fn int_parser(s: &str) -> Result<u32, String> {
 }
 
 #[inline(always)]
-pub fn float_parser(s: &str) -> Result<f32, String> {
-    s.parse().map_err(|e| format!("{}", e))
-}
-
-
-#[inline(always)]
 pub fn interpolation_parser(s: &str) -> Result<Interpolator, String> {
     match s {
         "none" => Ok(Interpolator::Nearest),

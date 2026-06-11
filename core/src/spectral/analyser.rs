@@ -65,13 +65,27 @@ pub fn analyze_pcm_sample(
     fft_plans: &SpectralPlans,
 ) -> AnalyzedSample {
     let fft_size = config.fft_size;
-    let fft_step = config.fft_step();
+    let fft_step = config.fft_step;
     let top_n = config.max_peaks_per_frame;
     let window_coeffs = fft_plans.window();
 
     let channels_count = pcm_channels.len();
     let bin_count = (fft_size / 2) + 1;
     let max_len = pcm_channels.iter().map(|c| c.len()).max().unwrap_or(0);
+
+    //test stuff
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+    let call_id = CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+    eprintln!(
+        "[analyze_pcm_sample] call #{} — max_len={} samples ({:.2}s @ {}Hz), channels={}",
+        call_id,
+        max_len,
+        max_len as f32 / original_sample_rate as f32,
+        original_sample_rate,
+        pcm_channels.len()
+    );
+    //test stuff
 
     let total_frames = if max_len <= fft_size {
         1
@@ -102,7 +116,7 @@ pub fn analyze_pcm_sample(
     let mut selected_peaks: Vec<Bin> = Vec::with_capacity(top_n);
 
     let delta_f = original_sample_rate as f32 / fft_size as f32;
-    let magnitude_threshold_db = -60.0;
+    //let magnitude_threshold_db = -60.0;
     let semitone_ratio = 2f32.powf(1.0 / 12.0);
 
     // Floor on magnitude for log10 to avoid -inf for exact-zero bins.
@@ -158,13 +172,12 @@ pub fn analyze_pcm_sample(
 
                 let mag = magnitudes[idx];
                 let mag_db = 20.0 * mag.max(MAG_FLOOR).log10();
-                if mag_db < magnitude_threshold_db {
-                    // Bins are sorted descending — once we drop below the floor,
-                    // every remaining bin is also below it.
+                let raw_freq = idx as f32 * delta_f;
+                let dynamic_threshold = -60.0 - 20.0 * (raw_freq / 1000.0).log10();
+                if mag_db < dynamic_threshold {
                     break;
                 }
 
-                let raw_freq = idx as f32 * delta_f;
                 let min_dist = (raw_freq * (semitone_ratio - 1.0)).max(delta_f * 1.5);
 
                 if selected_peaks.iter().any(|p| (p.frequency - raw_freq).abs() < min_dist) {
@@ -237,7 +250,7 @@ pub fn analyze_pcm_sample(
         }
     }
 
-    AnalyzedSample {
+    let result = AnalyzedSample {
         flat_peaks: Arc::from(flat_peaks_accumulator),
         total_frames,
         peaks_per_frame: top_n,
@@ -245,5 +258,16 @@ pub fn analyze_pcm_sample(
         original_sample_rate,
         fft_size,
         fft_step,
-    }
+    };
+    //test stuff
+    let bytes = result.flat_peaks.len() * std::mem::size_of::<Bin>();
+    eprintln!(
+        "[analyze_pcm_sample] call #{} done — total_frames={}, top_n={}, bytes={:.2}MB",
+        call_id,
+        total_frames,
+        top_n,
+        bytes as f32 / 1_000_000.0
+    );
+    //test stuff
+    result
 }

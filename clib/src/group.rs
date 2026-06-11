@@ -1,8 +1,14 @@
-use crate::{XSynth_GenDefault_StreamParams, XSynth_StreamParams, XSynth_SpectralConfig, handles::*, utils::*};
+use crate::{
+    handles::*, utils::*, XSynth_GenDefault_StreamParams, XSynth_SpectralConfig,
+    XSynth_StreamParams,
+};
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use xsynth_core::{
-    AudioPipe, channel::{ChannelConfigEvent, ChannelEvent, ChannelInitOptions}, channel_group::{ChannelGroup, ChannelGroupConfig, SynthEvent}, spectral::SpectralConfig,
+    channel::{ChannelConfigEvent, ChannelEvent, ChannelInitOptions},
+    channel_group::{ChannelGroup, ChannelGroupConfig, SynthEvent},
+    spectral::SpectralConfig,
+    AudioPipe,
 };
 
 /// Options regarding which parts of the ChannelGroup should be multithreaded.
@@ -89,7 +95,7 @@ pub extern "C" fn XSynth_ChannelGroup_Create(options: XSynth_GroupOptions) -> XS
         parallelism: convert_parallelism_to_rust(options.parallelism),
         spectral_config: unsafe { options.spectral_config.as_ref() }.map(|spec| SpectralConfig {
             fft_size: spec.fft_size,
-            overlap_percent: spec.overlap_percent,
+            fft_step: spec.fft_step,
             max_voices: if spec.max_voices == 0 {
                 None
             } else {

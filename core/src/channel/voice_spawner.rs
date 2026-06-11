@@ -18,7 +18,8 @@ fn voice_iter_spectral_from_vec<'a>(
     vec: &'a [Box<dyn VoiceSpawner>],
     control: &'a VoiceControlData,
 ) -> impl Iterator<Item = Box<dyn Voice>> + 'a {
-    vec.iter().map(move |voice| voice.spawn_spectral_voice(control))
+    vec.iter()
+        .map(move |voice| voice.spawn_spectral_voice(control))
 }
 
 fn exclusive_classes_from_vec<'a>(

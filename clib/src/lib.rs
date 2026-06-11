@@ -39,7 +39,7 @@ pub struct XSynth_StreamParams {
 #[repr(C)]
 pub struct XSynth_SpectralConfig {
     pub fft_size: usize,
-    pub overlap_percent: f32,
+    pub fft_step: usize,
     /// Maximum number of simultaneous spectral voices.
     /// If set to 0, spectral voice allocation is unlimited.
     pub max_voices: usize,

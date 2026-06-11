@@ -25,9 +25,7 @@ use xsynth_core::{
     AudioPipe, AudioStreamParams, FunctionAudioPipe,
 };
 
-use crate::{
-    util::ReadWriteAtomicU64, RealtimeEventSender, SynthEvent, XSynthRealtimeConfig,
-};
+use crate::{util::ReadWriteAtomicU64, RealtimeEventSender, SynthEvent, XSynthRealtimeConfig};
 
 #[derive(Debug, Error)]
 pub enum RealtimeSynthError {

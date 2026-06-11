@@ -5,8 +5,8 @@ use xsynth_core::{
     channel::ChannelInitOptions,
     channel_group::{ChannelGroupConfig, ParallelismOptions, SynthFormat, ThreadCount},
     soundfont::{EnvelopeCurveType, EnvelopeOptions, Interpolator, SoundfontInitOptions},
-    AudioStreamParams, ChannelCount,
     spectral::SpectralConfig,
+    AudioStreamParams, ChannelCount,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -119,12 +119,12 @@ impl State {
                 .action(ArgAction::SetTrue),
             Arg::new("fft size")
                 .long("fft-size")
-                .help("FFT window size for spectral processing. Must be a power of 2.\nDefault: 1024")
+                .help("FFT window size for spectral processing. Must be a power of 2.\nDefault: 8192")
                 .value_parser(int_parser),
-            Arg::new("overlap percent")
-                .long("overlap-percent")
-                .help("Temporal overlap percentage between FFT windows for spectral processing.\nDefault: 0.75")
-                .value_parser(float_parser),
+            Arg::new("fft step")
+                .long("fft-step")
+                .help("Temporal overlap between FFT windows for spectral processing.\nDefault: 2048")
+                .value_parser(int_parser),
             Arg::new("max peaks per frame")
                 .long("max-peaks")
                 .help("Maximum number of peaks to retain per frame for spectral processing.\nDefault: 32")
@@ -138,122 +138,120 @@ impl State {
     }
 
     fn from_matches(matches: &ArgMatches) -> Self {
-    let midi = matches
-        .get_one::<String>("midi")
-        .cloned()
-        .unwrap_or_default();
+        let midi = matches
+            .get_one::<String>("midi")
+            .cloned()
+            .unwrap_or_default();
 
-    let output = matches
-        .get_one::<String>("output")
-        .cloned()
-        .unwrap_or_else(|| "out.wav".to_owned());
+        let output = matches
+            .get_one::<String>("output")
+            .cloned()
+            .unwrap_or_else(|| "out.wav".to_owned());
 
-    let soundfonts = matches
-        .get_many::<String>("soundfonts")
-        .unwrap_or_default()
-        .map(PathBuf::from)
-        .collect::<Vec<_>>();
+        let soundfonts = matches
+            .get_many::<String>("soundfonts")
+            .unwrap_or_default()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
 
-    // FIXED: Added explicit type annotation matching whatever your `layers_parser` outputs.
-    // Assuming layers_parser returns a usize or Option<usize>
-    let layer_limit = matches
-        .get_one::<Option<usize>>("layer limit")
-        .copied()
-        .unwrap_or(Some(32));
-
-    // FIXED: Action flags (SetTrue/SetFalse) must use .get_flag()
-    let disable_fade_out = matches.get_flag("disable fade out voice killing"); 
-    let linear_envelope = matches.get_flag("linear envelope");
-    let use_limiter = matches.get_flag("limiter");
-    let is_spectral = matches.get_flag("spectral");
-
-    let spectral_config = if is_spectral {
-        // Pull them out using <u32> to match your int_parser, then cast to usize
-        let fft_size = matches
-            .get_one::<u32>("fft size")
+        // FIXED: Added explicit type annotation matching whatever your `layers_parser` outputs.
+        // Assuming layers_parser returns a usize or Option<usize>
+        let layer_limit = matches
+            .get_one::<Option<usize>>("layer limit")
             .copied()
-            .unwrap_or(1024) as usize;
+            .unwrap_or(Some(32));
 
-        let overlap_percent = matches
-            .get_one::<f32>("overlap percent")
-            .copied()
-            .unwrap_or(0.75);
+        // FIXED: Action flags (SetTrue/SetFalse) must use .get_flag()
+        let disable_fade_out = matches.get_flag("disable fade out voice killing");
+        let linear_envelope = matches.get_flag("linear envelope");
+        let use_limiter = matches.get_flag("limiter");
+        let is_spectral = matches.get_flag("spectral");
 
-        let max_peaks_per_frame = matches.get_one::<u32>("max peaks per frame")
-            .copied()
-            .unwrap_or(32) as usize;
-        
-        Some(SpectralConfig {
-            fft_size,
-            overlap_percent: overlap_percent,
-            max_voices: layer_limit,
-            enable_phase_fade_out: disable_fade_out,
-            max_peaks_per_frame,
-        })
-    } else {
-        None
-    };
+        let spectral_config = if is_spectral {
+            // Pull them out using <u32> to match your int_parser, then cast to usize
+            let fft_size = matches.get_one::<u32>("fft size").copied().unwrap_or(8192) as usize;
 
-    let config = XSynthRenderConfig {
-        group_options: ChannelGroupConfig {
-            channel_init_options: ChannelInitOptions {
-                fade_out_killing: disable_fade_out,
-            },
-            format: SynthFormat::Midi,
-            audio_params: AudioStreamParams::new(
-                matches.get_one::<u32>("sample rate").copied().unwrap_or(48000),
-                matches
-                    .get_one::<ChannelCount>("audio channels")
-                    .copied()
-                    .unwrap_or(ChannelCount::Stereo),
-            ),
-            parallelism: ParallelismOptions {
-                channel: matches
-                    .get_one::<ThreadCount>("channel threading")
-                    .copied()
-                    .unwrap_or(ThreadCount::Auto),
-                key: matches
-                    .get_one::<ThreadCount>("key threading")
-                    .copied()
-                    .unwrap_or(ThreadCount::Auto),
-            },
-            spectral_config: spectral_config.clone(),
-        },
-        sf_options: SoundfontInitOptions {
-            bank: None,
-            preset: None,
-            vol_envelope_options: if linear_envelope {
-                EnvelopeOptions {
-                    attack_curve: EnvelopeCurveType::Exponential,
-                    decay_curve: EnvelopeCurveType::Exponential,
-                    release_curve: EnvelopeCurveType::Exponential,
-                }
-            } else {
-                EnvelopeOptions {
-                    attack_curve: EnvelopeCurveType::Exponential,
-                    decay_curve: EnvelopeCurveType::Linear,
-                    release_curve: EnvelopeCurveType::Linear,
-                }
-            },
-            use_effects: true,
-            interpolator: matches
-                .get_one::<Interpolator>("interpolation")
+            let fft_step = matches.get_one::<u32>("fft step").copied().unwrap_or(2048) as usize;
+
+            let max_peaks_per_frame = matches
+                .get_one::<u32>("max peaks per frame")
                 .copied()
-                .unwrap_or(Interpolator::Linear),
-            spectral_config: spectral_config.clone(),
-        },
-        use_limiter,
-        spectral_config,
-    };
+                .unwrap_or(32) as usize;
 
-    Self {
-        config,
-        layers: layer_limit,
-        midi: PathBuf::from(midi),
-        output: PathBuf::from(output),
-        soundfonts,
+            Some(SpectralConfig {
+                fft_size,
+                fft_step: fft_step,
+                max_voices: layer_limit,
+                enable_phase_fade_out: disable_fade_out,
+                max_peaks_per_frame,
+            })
+        } else {
+            None
+        };
+
+        let config = XSynthRenderConfig {
+            group_options: ChannelGroupConfig {
+                channel_init_options: ChannelInitOptions {
+                    fade_out_killing: disable_fade_out,
+                },
+                format: SynthFormat::Midi,
+                audio_params: AudioStreamParams::new(
+                    matches
+                        .get_one::<u32>("sample rate")
+                        .copied()
+                        .unwrap_or(48000),
+                    matches
+                        .get_one::<ChannelCount>("audio channels")
+                        .copied()
+                        .unwrap_or(ChannelCount::Stereo),
+                ),
+                parallelism: ParallelismOptions {
+                    channel: matches
+                        .get_one::<ThreadCount>("channel threading")
+                        .copied()
+                        .unwrap_or(ThreadCount::Auto),
+                    key: matches
+                        .get_one::<ThreadCount>("key threading")
+                        .copied()
+                        .unwrap_or(ThreadCount::Auto),
+                },
+                spectral_config: spectral_config.clone(),
+            },
+            sf_options: SoundfontInitOptions {
+                bank: None,
+                preset: None,
+                vol_envelope_options: if linear_envelope {
+                    EnvelopeOptions {
+                        attack_curve: EnvelopeCurveType::Exponential,
+                        decay_curve: EnvelopeCurveType::Exponential,
+                        release_curve: EnvelopeCurveType::Exponential,
+                    }
+                } else {
+                    EnvelopeOptions {
+                        attack_curve: EnvelopeCurveType::Exponential,
+                        decay_curve: EnvelopeCurveType::Linear,
+                        release_curve: EnvelopeCurveType::Linear,
+                    }
+                },
+                use_effects: true,
+                interpolator: matches
+                    .get_one::<Interpolator>("interpolation")
+                    .copied()
+                    .unwrap_or(Interpolator::Linear),
+                spectral_config: spectral_config.clone(),
+            },
+            use_limiter,
+            spectral_config,
+        };
+
+        Self {
+            config,
+            layers: layer_limit,
+            midi: PathBuf::from(midi),
+            output: PathBuf::from(output),
+            soundfonts,
+        }
     }
-}
 }
 
 #[cfg(test)]

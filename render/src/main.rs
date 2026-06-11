@@ -36,32 +36,31 @@ use atomic_float::AtomicF64;
 
 #[hotpath::main]
 fn main() {
+    let instant_speed = Arc::new(AtomicF64::new(0.0));
 
     let state = State::from_args();
     let params = state.config.group_options.audio_params;
 
-    eprintln!("Loading soundfonts...");
+    print!("Loading soundfonts...");
+
+    let now = Instant::now();
 
     let soundfonts = state
-    .soundfonts
-    .iter()
-    .map(|s| {
-        // Print the file we are opening
-        //eprintln!("[DEBUG]: Initializing SampleSoundfont for: {:?}", s);
-        //eprintln!("[DEBUG]: FFT Size: {}, Hop Size: {}", 
-        //    state.config.spectral_config.as_ref().map(|c| c.fft_size).unwrap_or(0),
-        //    state.config.spectral_config.as_ref().map(|c| c.fft_size).unwrap_or(0)
-        //);
+        .soundfonts
+        .iter()
+        .map(|s| {
+            let sf: Arc<dyn SoundfontBase> =
+                Arc::new(SampleSoundfont::new(s, params, state.config.sf_options).unwrap());
+            sf
+        })
+        .collect::<Vec<Arc<dyn SoundfontBase>>>();
 
-        let sf: Arc<dyn SoundfontBase> =
-            Arc::new(SampleSoundfont::new(s, params, state.config.sf_options).unwrap());
-        
-        //eprintln!("[DEBUG]: Successfully loaded soundfont!");
-        sf
-    })
-    .collect::<Vec<Arc<dyn SoundfontBase>>>();
-
-    print!("soundfont initialised");
+    let elapsed = now.elapsed();
+    thread::sleep(Duration::from_millis(200));
+    print!(
+        "soundfont loaded in {:?}. Initializing renderer...",
+        elapsed
+    );
 
     let mut synth = OfflineWavRenderer::new(
         OfflineRenderConfig {
@@ -101,24 +100,13 @@ fn main() {
     let voices = Arc::new(AtomicU64::new(0));
 
     {
-        let position = position.clone(); 
+        let position = position.clone();
         let voices = voices.clone();
-        let mut start = std::time::Instant::now();
-        let mut last_pos = position.load(Ordering::Relaxed);
+        let instant_speed = instant_speed.clone();
 
         thread::spawn(move || loop {
-            let now = std::time::Instant::now();
             let pos = position.load(Ordering::Relaxed);
             let progress = (pos / length) * 100.0 + 0.0004;
-
-            let dt = (now - start).as_secs_f64();
-            let dpos = pos - last_pos;
-
-            // seconds of file time processed per second of wall time
-            let speed = if dt > 0.0 { dpos / dt } else { 0.0 };
-
-            last_pos = pos;
-            start = now;
 
             print!("\rProgress: [");
             let bars = progress as u8 / 5;
@@ -132,7 +120,7 @@ fn main() {
 
             print!("] {progress:.3}% | ");
             print!("Voice Count: {}", voices.load(Ordering::Relaxed));
-            print!(" | Speed: {:.2}x RT", speed);
+            print!(" | Speed: {:.2}x RT", instant_speed.load(Ordering::Relaxed));
 
             for _ in 0..10 {
                 print!(" ");
@@ -149,7 +137,22 @@ fn main() {
 
     for batch in rcv {
         if batch.delta > 0.0 {
+            let render_start = std::time::Instant::now();
+
             synth.render_batch(batch.delta).unwrap();
+
+            //stats stuff
+            let render_dt = render_start.elapsed().as_secs_f64();
+
+            let speed = if render_dt > 0.0 {
+                batch.delta / render_dt
+            } else {
+                0.0
+            };
+            let smoothed = instant_speed.load(Ordering::Relaxed) * 0.9 + speed * 0.1;
+            instant_speed.store(smoothed, Ordering::Relaxed);
+            //end of stats stuff
+
             position.fetch_add(batch.delta, Ordering::Relaxed);
             voices.store(synth.voice_count(), Ordering::Relaxed);
         }

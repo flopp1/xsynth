@@ -28,33 +28,39 @@ fn criterion_benchmark(c: &mut Criterion) {
     let layer_count = 512 * 4;
 
     let spectral_config = xsynth_core::spectral::SpectralConfig {
-        fft_size: 1024,          // Standard FFT window sizing
-        overlap_percent: 0.75,   // 75% overlap for smooth phase tracking
+        fft_size: 8192, // Standard FFT window sizing
+        fft_step: 2048, // 75% overlap for smooth phase tracking
         max_voices: Some(layer_count),
         enable_phase_fade_out: true,
         max_peaks_per_frame: 64, //64 seems like a good amount of peaks for real render situations, will update after testing
     };
 
     let soundfonts: Vec<Arc<dyn SoundfontBase>> = vec![Arc::new(
-        SampleSoundfont::new(sfz, 
-                            stream_params, 
-                            xsynth_core::soundfont::SoundfontInitOptions {
-                                bank: None,
-                                preset: None,
-                                vol_envelope_options: EnvelopeOptions {
-                                    attack_curve: EnvelopeCurveType::Exponential,
-                                    decay_curve: EnvelopeCurveType::Exponential,
-                                    release_curve: EnvelopeCurveType::Exponential,
-                                },
-                                interpolator: Interpolator::Nearest,
-                                use_effects: false,
-                                spectral_config: Some(spectral_config),
-                            },
-        ).unwrap(),
+        SampleSoundfont::new(
+            sfz,
+            stream_params,
+            xsynth_core::soundfont::SoundfontInitOptions {
+                bank: None,
+                preset: None,
+                vol_envelope_options: EnvelopeOptions {
+                    attack_curve: EnvelopeCurveType::Exponential,
+                    decay_curve: EnvelopeCurveType::Exponential,
+                    release_curve: EnvelopeCurveType::Exponential,
+                },
+                interpolator: Interpolator::Nearest,
+                use_effects: false,
+                spectral_config: Some(spectral_config),
+            },
+        )
+        .unwrap(),
     )];
 
     let make_new_channel = || {
-        let mut channel = VoiceChannel::new(Default::default(), stream_params, /*None,*/ Some(spectral_config));
+        let mut channel = VoiceChannel::new(
+            Default::default(),
+            stream_params,
+            /*None,*/ Some(spectral_config),
+        );
         channel.process_event(ChannelEvent::Config(ChannelConfigEvent::SetSoundfonts(
             soundfonts.clone(),
         )));

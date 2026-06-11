@@ -172,7 +172,7 @@ impl SampleSoundfont {
 
         let spectral_config = options.spectral_config.unwrap_or_default();
 
-        let spectral_plans = SpectralPlans::new(spectral_config.fft_size, spectral_config.fft_step());
+        let spectral_plans = SpectralPlans::new(spectral_config.fft_size, spectral_config.fft_step);
 
         let mut spawner_params_list = Vec::<Vec<Arc<SampleVoiceSpawnerParams>>>::new();
         for _ in 0..(128 * 128) {
@@ -342,7 +342,7 @@ impl SampleSoundfont {
 
         let spectral_config = options.spectral_config.unwrap_or_default();
 
-        let spectral_plans = SpectralPlans::new(spectral_config.fft_size, spectral_config.fft_step());
+        let spectral_plans = SpectralPlans::new(spectral_config.fft_size, spectral_config.fft_step);
 
         for preset in presets {
             if let Some(bank) = options.bank {
@@ -376,6 +376,7 @@ impl SampleSoundfont {
                 let spectral_sample = if options.spectral_config.is_some() {
                     Some(spectral_cache.entry(key)
                         .or_insert_with(|| {
+                            eprintln!("[spectral_cache] MISS — computing analysis");
                             Arc::new(analyze_pcm_sample(region_samples.clone(), sample_rate, &spectral_config, &spectral_plans))
                         })
                         .clone())

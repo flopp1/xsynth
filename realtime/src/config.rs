@@ -56,11 +56,11 @@ impl Default for XSynthRealtimeConfig {
             multithreading: ThreadCount::None,
             ignore_range: 0..=0,
             spectral_config: Some(xsynth_core::spectral::SpectralConfig {
-                fft_size: 1024, // Fix property name (window_size instead of fft_size)
-                max_voices: Some(4096),  // Set high voice ceiling to support intensive benchmark stress loops
+                fft_size: 8192,         // Fix property name (window_size instead of fft_size)
+                max_voices: Some(4096), // Set high voice ceiling to support intensive benchmark stress loops
                 enable_phase_fade_out: true,
                 max_peaks_per_frame: 32, // Default value, can be adjusted as needed
-                overlap_percent: 0.75,   // Default overlap percentage
+                fft_step: 2048,          // Default FFT step size
             }),
         }
     }

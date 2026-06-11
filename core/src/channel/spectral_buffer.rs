@@ -1,11 +1,11 @@
 use super::ChannelInitOptions;
 use crate::voice::{ReleaseType, Voice};
+use simdeez::Simd;
 use std::{
     collections::VecDeque,
     fmt::Debug,
     ops::{Deref, DerefMut},
 };
-use simdeez::Simd;
 
 struct GroupSpectralVoice {
     pub id: usize,
@@ -64,7 +64,7 @@ impl<T: Simd> SpectralVoiceBuffer<T> {
         self.id_counter
     }
 
-    /// Pops the quietest spectral voice group. Multiple voices can belong to the same 
+    /// Pops the quietest spectral voice group. Multiple voices can belong to the same
     /// polyphonic group if spawned by a singular event (e.g., overlapping multi-samples).
     fn pop_quietest_voice_group(&mut self, ignored_id: usize) {
         if self.buffer.is_empty() {
@@ -75,7 +75,7 @@ impl<T: Simd> SpectralVoiceBuffer<T> {
         let mut quietest_index = 0;
         let mut quietest_id = 0;
         let mut count = 0;
-        
+
         for i in 0..self.buffer.len() {
             let voice = &self.buffer[i];
             if voice.id == ignored_id || voice.is_killed() {
@@ -151,7 +151,7 @@ impl<T: Simd> SpectralVoiceBuffer<T> {
     ) {
         let mut len = 0;
         let id = self.get_id();
-        
+
         for voice in voices {
             self.buffer.push_back(GroupSpectralVoice { id, voice });
             len += 1;
@@ -218,10 +218,9 @@ impl<T: Simd> SpectralVoiceBuffer<T> {
     pub fn remove_ended_voices(&mut self) {
         self.buffer.retain(|voice_group| !voice_group.ended());
     }
-//  pub fn iter_voices<'a>(&'a self) -> impl Iterator<Item = &Box<dyn Voice>> + 'a {
-//     self.buffer.iter().map(|group| &group.voice)
-//  }
-
+    //  pub fn iter_voices<'a>(&'a self) -> impl Iterator<Item = &Box<dyn Voice>> + 'a {
+    //     self.buffer.iter().map(|group| &group.voice)
+    //  }
 
     pub fn iter_voices_mut(&mut self) -> impl Iterator<Item = &mut Box<dyn Voice>> {
         self.buffer.iter_mut().map(|group| &mut group.voice)

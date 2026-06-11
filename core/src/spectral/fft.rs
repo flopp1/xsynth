@@ -1,5 +1,5 @@
+use rustfft::{num_complex::Complex, Fft, FftPlanner};
 use std::sync::Arc;
-use rustfft::{Fft, FftPlanner, num_complex::Complex};
 
 pub struct SpectralPlans {
     pub(crate) forward_plan: Arc<dyn Fft<f32>>,
@@ -19,7 +19,9 @@ impl SpectralPlans {
         // Pre-calculate Hanning window for the requested size
         let mut window = Vec::with_capacity(fft_size);
         for i in 0..fft_size {
-            let val = 0.5 * (1.0 - f32::cos((2.0 * std::f32::consts::PI * i as f32) / (fft_size as f32 - 1.0)));
+            let val = 0.5
+                * (1.0
+                    - f32::cos((2.0 * std::f32::consts::PI * i as f32) / (fft_size as f32 - 1.0)));
             window.push(val);
         }
 
@@ -31,7 +33,7 @@ impl SpectralPlans {
             window,
         }
     }
-    
+
     #[inline(always)]
     pub fn fft_size(&self) -> usize {
         self.fft_size

@@ -63,7 +63,7 @@ pub struct SoundfontInitOptions {
     pub vol_envelope_options: EnvelopeOptions,
     pub use_effects: bool,
     pub interpolator: Interpolator,
-    
+
     /// NEW: Optional settings parameters enabling load-time spectral data generation.
     /// If `Some`, the parser handles offline analysis matrices during asset loading phases.
     pub spectral_config: Option<SpectralConfig>,

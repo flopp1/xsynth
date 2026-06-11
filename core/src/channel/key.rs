@@ -9,7 +9,7 @@ use super::{
 };
 
 pub struct KeyData {
-    // Made public to crate so that the master channel loop can inspect keys 
+    // Made public to crate so that the master channel loop can inspect keys
     // when draining and spawning events directly into the spectral buffer.
     pub(crate) key: u8,
     voices: VoiceBuffer,

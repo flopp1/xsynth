@@ -1,6 +1,6 @@
 use std::{marker::PhantomData, ops::Mul, sync::Arc};
 
-use simdeez::{Simd, scalar::Scalar};
+use simdeez::{scalar::Scalar, Simd};
 
 use crate::{
     effects::BiQuadFilter,
@@ -24,7 +24,7 @@ use xsynth_soundfonts::LoopMode;
 
 use crate::soundfont::{Interpolator, LoopParams, SampleVoiceSpawnerParams, VoiceSpawner};
 
-use crate::spectral::{SpectralVoice, AnalyzedSample};
+use crate::spectral::{AnalyzedSample, SpectralVoice};
 
 pub struct MonoSampledVoiceSpawner<S: 'static + Simd + Send + Sync> {
     speed_mult: f32,
@@ -218,11 +218,10 @@ impl<S: 'static + Sync + Send + Simd> VoiceSpawner for MonoSampledVoiceSpawner<S
     fn spawn_voice(&self, control: &VoiceControlData) -> Box<dyn Voice> {
         self.begin_voice(control)
     }
-    
+
     fn spawn_spectral_voice(&self, control: &VoiceControlData) -> Box<dyn Voice> {
         if let Some(ref spectral_sample) = self.spectral_sample {
-            
-            // FIXED: Integrated dynamic standard calculation logic for allow_release 
+            // FIXED: Integrated dynamic standard calculation logic for allow_release
             // to match structural requirements across execution loops.
             let allow_release = self.loop_params.mode != LoopMode::OneShot;
 
@@ -232,10 +231,9 @@ impl<S: 'static + Sync + Send + Simd> VoiceSpawner for MonoSampledVoiceSpawner<S
                 allow_release,
                 self.stream_params.sample_rate as f32,
             );
-            
-            let derived_trigger_note = (self.root_key as f32 
-                + 12.0 * self.speed_mult.log2())
-                .round() as u8;
+
+            let derived_trigger_note =
+                (self.root_key as f32 + 12.0 * self.speed_mult.log2()).round() as u8;
 
             // 1. Instantiate the inner spectral calculation voice core
             let spectral_generator = SpectralVoice::<Scalar>::new(

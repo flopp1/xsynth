@@ -83,8 +83,6 @@ impl VolumeLimiter {
             pos: 0,
         }
     }
-
-
 }
 
 impl<'a, 'b, T: 'b + Iterator<Item = f32>> Iterator for VolumeLimiterIter<'a, 'b, T> {
@@ -93,10 +91,7 @@ impl<'a, 'b, T: 'b + Iterator<Item = f32>> Iterator for VolumeLimiterIter<'a, 'b
     fn next(&mut self) -> Option<Self::Item> {
         let next = self.samples.next();
         if let Some(next) = next {
-            let val = self
-                .limiter
-                .channels[self.pos % self.limiter.channel_count]
-                .limit(next);
+            let val = self.limiter.channels[self.pos % self.limiter.channel_count].limit(next);
             self.pos += 1;
             Some(val)
         } else {
@@ -104,4 +99,3 @@ impl<'a, 'b, T: 'b + Iterator<Item = f32>> Iterator for VolumeLimiterIter<'a, 'b
         }
     }
 }
-

@@ -1,10 +1,13 @@
-use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 use rustfft::num_complex::Complex;
 use simdeez::prelude::*;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
-use crate::voice::{ReleaseType, SpectralGroupKey, SpectralStateSnapshot, VoiceControlData, VoiceGeneratorBase, VoiceSampleGenerator, SIMDVoiceEnvelope, SIMDVoiceGenerator, SpectralVoiceSampleGenerator};
 use super::AnalyzedSample;
+use crate::voice::{
+    ReleaseType, SIMDVoiceEnvelope, SIMDVoiceGenerator, SpectralGroupKey, SpectralStateSnapshot,
+    SpectralVoiceSampleGenerator, VoiceControlData, VoiceGeneratorBase, VoiceSampleGenerator,
+};
 
 pub struct SpectralVoice<T: Simd> {
     sample_data: Arc<AnalyzedSample>,
@@ -20,6 +23,7 @@ pub struct SpectralVoice<T: Simd> {
     /// not by FFT bin index. Since peaks_per_frame (e.g. 64) is fixed and far smaller than
     /// bin_count (e.g. 513/2049), this is a small fixed-size vector regardless of FFT size.
     previous_phases: Vec<f32>,
+    last_pitch_ratio: f32,
 }
 
 impl<T: Simd> SpectralVoice<T> {
@@ -33,6 +37,16 @@ impl<T: Simd> SpectralVoice<T> {
         // Sized to peaks_per_frame, not fft_size/2+1 — phase tracking is per selected
         // peak, not per dense FFT bin.
         let peak_count = sample_data.peaks_per_frame;
+        // Initialize last_pitch_ratio from the same formula used in
+        // spectral_generate_template, so the FIRST block (before
+        // spectral_generate_template has run even once for this voice)
+        // already has a correct value rather than defaulting to 1.0,
+        // which would be wrong for any pitch-shifted note and cause
+        // a one-block envelope-rate glitch at note-on.
+        let note_diff = trigger_note as f32 - root_note as f32;
+        let base_pitch_ratio = (note_diff / 12.0_f32).exp2();
+        let sample_rate_scaling = sample_data.original_sample_rate as f32 / sample_rate;
+        let initial_pitch_ratio = base_pitch_ratio * 1.0 * sample_rate_scaling; /* current_pitch_bend starts at 1.0 */ 
         Self {
             sample_data,
             envelope,
@@ -43,12 +57,17 @@ impl<T: Simd> SpectralVoice<T> {
             current_volume: 1.0,
             current_pitch_bend: 1.0,
             previous_phases: vec![0.0; peak_count],
+            last_pitch_ratio: initial_pitch_ratio,
         }
     }
 
-    pub fn fft_size(&self) -> usize { self.sample_data.fft_size }
+    pub fn fft_size(&self) -> usize {
+        self.sample_data.fft_size
+    }
 
-    pub fn fft_step(&self) -> usize { self.sample_data.fft_step }
+    pub fn fft_step(&self) -> usize {
+        self.sample_data.fft_step
+    }
 
     pub fn update_host_sample_rate(&mut self, new_rate: f32) {
         self.sample_rate = new_rate;
@@ -104,14 +123,14 @@ impl<T: Simd> SpectralVoice<T> {
         let base_pitch_ratio = (note_diff / 12.0_f32).exp2();
         let sample_rate_scaling = self.sample_data.original_sample_rate as f32 / self.sample_rate;
         let total_pitch_ratio = base_pitch_ratio * self.current_pitch_bend * sample_rate_scaling;
-
+        self.last_pitch_ratio = total_pitch_ratio;
         // Hz-per-bin in the OUTPUT spectrum (pipeline's fft_size/sample_rate), used to
         // convert a peak's (pitch-shifted) frequency into a target bin index.
         let output_bin_hz = self.sample_rate / fft_size as f32;
 
         // Expected phase advance per hop for a sinusoid at a given frequency:
         // delta_phase = 2*pi * freq * (fft_step / sample_rate)
-        let hop_seconds = fft_step as f32 / self.sample_rate;
+        //let hop_seconds = fft_step as f32 / self.sample_rate;
 
         // previous_phases is indexed by PEAK SLOT (0..peaks_per_frame), not by bin.
         // If the analysis stored fewer peaks for this frame than peaks_per_frame
@@ -138,22 +157,36 @@ impl<T: Simd> SpectralVoice<T> {
 
             // Phase vocoder: predict phase advance for this peak's (shifted) frequency
             // over one hop, then unwrap against the previous true phase for this peak slot.
-            let expected_phase_step = 2.0 * std::f32::consts::PI * shifted_freq * hop_seconds;
-            let expected = self.previous_phases[peak_idx] + expected_phase_step;
+            //let expected_phase_step = 2.0 * std::f32::consts::PI * shifted_freq * hop_seconds;
+            //let expected = self.previous_phases[peak_idx] + expected_phase_step;
 
-            let raw_phase = peak.phase;
-            let delta = raw_phase - (self.previous_phases[peak_idx]
-                - expected_phase_step * (frame_idx as f32 - 1.0).max(0.0));
-            let delta = delta - (delta / (2.0 * std::f32::consts::PI)).round() * 2.0 * std::f32::consts::PI;
-            let true_phase = expected + delta;
-            self.previous_phases[peak_idx] = true_phase;
+            //let raw_phase = peak.phase;
+            //let delta = raw_phase - (self.previous_phases[peak_idx]
+            //    - expected_phase_step * (frame_idx as f32 - 1.0).max(0.0));
+            //let delta = delta - (delta / (2.0 * std::f32::consts::PI)).round() * 2.0 * std::f32::consts::PI;
+            //let true_phase = expected + delta;
+            //self.previous_phases[peak_idx] = true_phase;
+            //end of phase vocoder
+
+            //direct phase tracking without explicit unwrapping — relies on high overlap
+            //to keep phase changes between frames small and consistent.
+            //This is more robust to inharmonicity and non-linear pitch shifts,
+            //at the cost of potentially less accurate phase tracking at low FFT sizes and low frequencies.
+            // In SpectralVoice, replace previous_phases usage with per-peak running phase
+            // driven by the SHIFTED frequency, advanced by one hop's worth of phase per block:
+            let phase_increment =
+                2.0 * std::f32::consts::PI * shifted_freq * (fft_step as f32 / self.sample_rate);
+            self.previous_phases[peak_idx] =
+                (self.previous_phases[peak_idx] + phase_increment) % (2.0 * std::f32::consts::PI);
+            let true_phase = self.previous_phases[peak_idx];
 
             let (sin_p, cos_p) = true_phase.sin_cos();
 
             // Multiple peaks (from different voices in a group, or even from the same
             // voice if pitch-shifting causes two source peaks to collide on one output
             // bin) can target the same bin — accumulate rather than overwrite.
-            template_bins[target_bin] += Complex::new(peak.magnitude * cos_p, peak.magnitude * sin_p);
+            template_bins[target_bin] +=
+                Complex::new(peak.magnitude * cos_p, peak.magnitude * sin_p);
         }
 
         self.current_frame += total_pitch_ratio;
@@ -161,28 +194,33 @@ impl<T: Simd> SpectralVoice<T> {
 
     pub fn copy_spectral_state_from(&mut self, source: &Self) {
         self.current_frame = source.current_frame;
-        self.previous_phases.copy_from_slice(&source.previous_phases);
+        self.previous_phases
+            .copy_from_slice(&source.previous_phases);
+        self.last_pitch_ratio = source.last_pitch_ratio;
     }
 
     pub fn spectral_state_snapshot(&self) -> SpectralStateSnapshot {
         SpectralStateSnapshot {
             current_frame: self.current_frame,
             previous_phases: self.previous_phases.clone(),
+            last_pitch_ratio: self.last_pitch_ratio,
         }
     }
 
     pub fn spectral_apply_state_snapshot(&mut self, snapshot: &SpectralStateSnapshot) {
         self.current_frame = snapshot.current_frame;
-        self.previous_phases.copy_from_slice(&snapshot.previous_phases);
+        self.previous_phases
+            .copy_from_slice(&snapshot.previous_phases);
+        self.last_pitch_ratio = snapshot.last_pitch_ratio;
     }
 
     pub fn spectral_advance_gain(&mut self, velocity: u8, fft_step: usize) -> f32 {
         let g_start = self.envelope.get_value_at_current_time();
-        for _ in 0..fft_step {
+        let envelope_steps = (fft_step as f32 * self.last_pitch_ratio).round().max(0.0) as usize;
+        for _ in 0..envelope_steps {
             let _ = self.envelope.next_sample();
         }
         let g_end = self.envelope.get_value_at_current_time();
-
         ((g_start + g_end) * 0.5) * self.current_volume * (velocity as f32 / 127.0)
     }
 }

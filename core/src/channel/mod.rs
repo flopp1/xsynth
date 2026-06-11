@@ -1,15 +1,14 @@
 use std::sync::{atomic::AtomicU64, Arc};
 
 use crate::{
-    AudioStreamParams, 
-    ChannelCount, 
-    effects::MultiChannelBiQuad, 
-    spectral::{SpectralConfig, SpectralPipeline, SpectralPlans}, 
+    effects::MultiChannelBiQuad,
+    spectral::{SpectralConfig, SpectralPipeline, SpectralPlans},
     voice::{Voice, VoiceControlData},
+    AudioStreamParams, ChannelCount,
 };
 
-use xsynth_soundfonts::FilterType;
 use simdeez::scalar::Scalar;
+use xsynth_soundfonts::FilterType;
 
 use self::{control::ControlEventData, key::KeyData, params::VoiceChannelParams};
 
@@ -17,12 +16,12 @@ use super::AudioPipe;
 
 mod channel_sf;
 mod control;
+mod event;
 mod key;
 mod params;
+mod spectral_buffer;
 mod voice_buffer;
 mod voice_spawner;
-mod spectral_buffer;
-mod event;
 pub use event::*;
 pub use spectral_buffer::*;
 
@@ -68,7 +67,7 @@ impl Default for ChannelInitOptions {
     }
 }
 
-/// Represents a single MIDI channel within XSynth supporting standard 
+/// Represents a single MIDI channel within XSynth supporting standard
 /// time-domain streaming or centralized frequency-domain spectral accumulation.
 pub struct VoiceChannel {
     key_voices: Vec<Key>,
@@ -117,15 +116,14 @@ impl VoiceChannel {
             let buffer_options = ChannelInitOptions {
                 fade_out_killing: config.enable_phase_fade_out,
             };
-            
+
             (
                 Some(SpectralPipeline::new(
-                    config, 
-                    stream_params.sample_rate as f32, 
-                    Arc::new(SpectralPlans::new(
-                        config.fft_size, 
-                        config.fft_step())))),
-                Some(SpectralVoiceBuffer::new(buffer_options))
+                    config,
+                    stream_params.sample_rate as f32,
+                    Arc::new(SpectralPlans::new(config.fft_size, config.fft_step)),
+                )),
+                Some(SpectralVoiceBuffer::new(buffer_options)),
             )
         } else {
             (None, None)
@@ -188,28 +186,36 @@ impl VoiceChannel {
         self.params.load_program();
 
         // ROUTE A: Centralized Frequency-Domain Pipeline Mode
-        if let (Some(ref mut buffer), Some(ref mut pipeline)) = (&mut self.spectral_voices, &mut self.spectral_pipeline) {
+        if let (Some(ref mut buffer), Some(ref mut pipeline)) =
+            (&mut self.spectral_voices, &mut self.spectral_pipeline)
+        {
             let params = &self.params;
             let control_data = &self.voice_control_data;
             let max_voices = pipeline.config().max_voices;
-            
+
             // 1. Drain event logs from all keys and push spawned notes directly into the unified spectral buffer
             for key in self.key_voices.iter_mut() {
                 for e in key.event_cache.drain(..) {
                     match e {
                         KeyNoteEvent::On(vel) => {
-                            let voices = params.channel_sf.spawn_voices_attack_spectral(control_data, key.data.key, vel);
+                            let voices = params.channel_sf.spawn_voices_attack_spectral(
+                                control_data,
+                                key.data.key,
+                                vel,
+                            );
                             buffer.push_voices(voices, max_voices);
                         }
                         KeyNoteEvent::Off => {
                             if let Some(vel) = buffer.release_next_voice() {
-                                let voices = params.channel_sf.spawn_voices_release_spectral(control_data, key.data.key, vel);
+                                let voices = params.channel_sf.spawn_voices_release_spectral(
+                                    control_data,
+                                    key.data.key,
+                                    vel,
+                                );
                                 buffer.push_voices(voices, max_voices);
                             }
                         }
-                        KeyNoteEvent::AllOff => {
-                            while buffer.release_next_voice().is_some() {}
-                        }
+                        KeyNoteEvent::AllOff => while buffer.release_next_voice().is_some() {},
                         KeyNoteEvent::AllKilled => {
                             buffer.kill_all_voices();
                         }
@@ -224,20 +230,21 @@ impl VoiceChannel {
             buffer.remove_ended_voices();
 
             // 4. Create a temporary reference vector on the stack
-            let mut active_references: Vec<&mut dyn Voice> = Vec::with_capacity(buffer.voice_count());
+            let mut active_references: Vec<&mut dyn Voice> =
+                Vec::with_capacity(buffer.voice_count());
             for voice_box in buffer.iter_voices_mut() {
                 active_references.push(&mut **voice_box);
             }
 
             // 5. Pass our short-lived references into the pipeline execution pass
             pipeline.drain_into(out, &mut active_references);
-            
+
             // 6. Mirror active counts to the global AtomicU64 statistics tracker
             let active_count = buffer.voice_count();
-            self.params.stats.voice_counter.store(
-                active_count as u64,
-                std::sync::atomic::Ordering::SeqCst
-            );
+            self.params
+                .stats
+                .voice_counter
+                .store(active_count as u64, std::sync::atomic::Ordering::SeqCst);
         } else {
             // ROUTE B: Legacy Time-Domain Mode
             // Process voices sequentially within each channel thread.

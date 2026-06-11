@@ -6,7 +6,10 @@ use std::{
 
 use xsynth_core::soundfont::{Interpolator, SampleSoundfont, SoundfontInitOptions};
 
-use crate::{consts::*, handles::*, utils::*, XSynth_GenDefault_StreamParams, XSynth_StreamParams, XSynth_SpectralConfig};
+use crate::{
+    consts::*, handles::*, utils::*, XSynth_GenDefault_StreamParams, XSynth_SpectralConfig,
+    XSynth_StreamParams,
+};
 
 /// Options for the curves of a specific envelope.
 /// - attack_curve: Controls the type of curve of the attack envelope stage.
@@ -88,9 +91,9 @@ pub extern "C" fn XSynth_GenDefault_SoundfontOptions() -> XSynth_SoundfontOption
         interpolator: XSYNTH_INTERPOLATION_NEAREST,
         use_spectral_analysis: true,
         spectral_config: XSynth_SpectralConfig {
-            fft_size: 1024,
-            overlap_percent: 0.75,
-            max_voices: 1024,
+            fft_size: 8192,
+            fft_step: 2048,
+            max_voices: 0, // 0 means unlimited
             enable_phase_fade_out: true,
             max_peaks_per_frame: 32,
         },
@@ -141,7 +144,7 @@ pub unsafe extern "C" fn XSynth_Soundfont_LoadNew(
             spectral_config: if options.use_spectral_analysis {
                 Some(xsynth_core::spectral::SpectralConfig {
                     fft_size: options.spectral_config.fft_size,
-                    overlap_percent: options.spectral_config.overlap_percent,
+                    fft_step: options.spectral_config.fft_step,
                     max_voices: if options.spectral_config.max_voices == 0 {
                         None
                     } else {

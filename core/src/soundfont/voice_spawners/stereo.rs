@@ -1,5 +1,5 @@
+use simdeez::{scalar::Scalar, Simd};
 use std::{marker::PhantomData, ops::Mul, sync::Arc};
-use simdeez::{Simd, scalar::Scalar};
 
 use crate::{
     effects::BiQuadFilter,
@@ -19,10 +19,10 @@ use crate::{
     },
 };
 
-use xsynth_soundfonts::LoopMode;
 use crate::soundfont::{Interpolator, LoopParams, SampleVoiceSpawnerParams, VoiceSpawner};
+use xsynth_soundfonts::LoopMode;
 
-use crate::spectral::{SpectralVoice, AnalyzedSample};
+use crate::spectral::{AnalyzedSample, SpectralVoice};
 
 pub struct StereoSampledVoiceSpawner<S: 'static + Simd + Send + Sync> {
     speed_mult: f32,
@@ -218,9 +218,9 @@ impl<S: Simd + Send + Sync> StereoSampledVoiceSpawner<S> {
         gen: impl 'static + SIMDVoiceGenerator<S, SIMDSampleStereo<S>>,
     ) -> Box<dyn Voice> {
         if let Some(filter) = &self.filter {
-            let active_filter = &filter.clone(); 
-            
-            // FIXED: Removed raw pointer/borrow reference `&active_filter` 
+            let active_filter = &filter.clone();
+
+            // FIXED: Removed raw pointer/borrow reference `&active_filter`
             // and passed the cloned configuration instance safely by value.
             let gen = SIMDStereoVoiceCutoff::new(gen, active_filter);
             self.convert_to_voice(gen)
@@ -237,8 +237,7 @@ impl<S: 'static + Sync + Send + Simd> VoiceSpawner for StereoSampledVoiceSpawner
 
     fn spawn_spectral_voice(&self, control: &VoiceControlData) -> Box<dyn Voice> {
         if let Some(ref spectral_sample) = self.spectral_sample {
-            
-            // FIXED: Integrated dynamic standard calculation logic for allow_release 
+            // FIXED: Integrated dynamic standard calculation logic for allow_release
             // to match structural requirements across execution loops.
             let allow_release = self.loop_params.mode != LoopMode::OneShot;
 
@@ -248,10 +247,9 @@ impl<S: 'static + Sync + Send + Simd> VoiceSpawner for StereoSampledVoiceSpawner
                 allow_release,
                 self.stream_params.sample_rate as f32,
             );
-            
-            let derived_trigger_note = (self.root_key as f32 
-                + 12.0 * self.speed_mult.log2())
-                .round() as u8;
+
+            let derived_trigger_note =
+                (self.root_key as f32 + 12.0 * self.speed_mult.log2()).round() as u8;
 
             // 1. Instantiate the inner spectral calculation voice core
             let spectral_generator = SpectralVoice::<Scalar>::new(
