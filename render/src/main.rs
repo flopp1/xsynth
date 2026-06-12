@@ -41,7 +41,7 @@ fn main() {
     let state = State::from_args();
     let params = state.config.group_options.audio_params;
 
-    print!("Loading soundfonts...");
+    eprintln!("Loading soundfonts...");
 
     let now = Instant::now();
 
@@ -57,7 +57,7 @@ fn main() {
 
     let elapsed = now.elapsed();
     thread::sleep(Duration::from_millis(200));
-    print!(
+    eprintln!(
         "soundfont loaded in {:?}. Initializing renderer...",
         elapsed
     );

@@ -43,7 +43,7 @@ mod tests {
         // analysis-side delta_f (from analyser.rs)
         let analysis_delta_f = sample_rate / fft_size as f32;
 
-        // pipeline-side output_bin_hz (from voice.rs spectral_generate_template)
+        // pipeline-side output_bin_hz (from voice.rs spectral_process_voice)
         let output_bin_hz = sample_rate / fft_size as f32;
 
         // These MUST be equal for unity pitch ratio to be a no-op mapping.
@@ -79,7 +79,7 @@ mod tests {
             let total_pitch_ratio = 1.0_f32;
             let shifted_freq = peak_freq * total_pitch_ratio;
 
-            // Pipeline-side mapping (from spectral_generate_template):
+            // Pipeline-side mapping (from spectral_process_voice):
             let target_bin_exact = shifted_freq / output_bin_hz;
             let target_bin = target_bin_exact.round() as usize;
 

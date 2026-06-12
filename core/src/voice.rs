@@ -33,25 +33,6 @@ pub(crate) use control::*;
 mod cutoff;
 pub(crate) use cutoff::*;
 
-use rustfft::num_complex::Complex;
-use std::hash::Hash;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct SpectralGroupKey {
-    pub sample_data_ptr: usize,
-    pub root_note: u8,
-    pub trigger_note: u8,
-    pub current_frame_bits: u32,
-    pub current_pitch_bend_bits: u32,
-    pub phase_signature: u64,
-}
-
-pub struct SpectralStateSnapshot {
-    pub current_frame: f32,
-    pub previous_phases: Vec<f32>,
-    pub last_pitch_ratio: f32,
-}
-
 /// Common interface for spectral voice generators.
 pub trait SpectralVoiceSampleGenerator {
     fn fft_size(&self) -> usize;
@@ -65,19 +46,14 @@ pub trait SpectralVoiceSampleGenerator {
         fft_step: usize,
         bin_count: usize,
     );*/
-
-    fn spectral_group_key(&self) -> SpectralGroupKey;
-    fn spectral_generate_template(
+    fn spectral_process_voice(
         &mut self,
-        template_bins: &mut [Complex<f32>],
+        scratch: &mut Vec<(usize, rustfft::num_complex::Complex<f32>)>,
         fft_size: usize,
         fft_step: usize,
         bin_count: usize,
     );
-    fn spectral_copy_state_from(&mut self, source: &dyn SpectralVoiceSampleGenerator);
-    fn spectral_state_snapshot(&self) -> SpectralStateSnapshot;
-    fn spectral_apply_state_snapshot(&mut self, snapshot: &SpectralStateSnapshot);
-    fn spectral_advance_gain(&mut self, velocity: u8, fft_step: usize) -> f32;
+    fn get_spectral_gain(&mut self, velocity: u8, fft_step: usize) -> f32;
     fn as_any(&self) -> &dyn std::any::Any;
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }

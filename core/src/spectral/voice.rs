@@ -1,12 +1,16 @@
 use rustfft::num_complex::Complex;
 use simdeez::prelude::*;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use super::AnalyzedSample;
 use crate::voice::{
-    ReleaseType, SIMDVoiceEnvelope, SIMDVoiceGenerator, SpectralGroupKey, SpectralStateSnapshot,
-    SpectralVoiceSampleGenerator, VoiceControlData, VoiceGeneratorBase, VoiceSampleGenerator,
+    ReleaseType, 
+    SIMDVoiceEnvelope, 
+    SIMDVoiceGenerator,
+    SpectralVoiceSampleGenerator, 
+    VoiceControlData, 
+    VoiceGeneratorBase, 
+    VoiceSampleGenerator,
 };
 
 pub struct SpectralVoice<T: Simd> {
@@ -18,11 +22,7 @@ pub struct SpectralVoice<T: Simd> {
     sample_rate: f32,
     current_volume: f32,
     current_pitch_bend: f32,
-
-    /// Phase accumulator state, indexed by PEAK index within a frame (0..peaks_per_frame),
-    /// not by FFT bin index. Since peaks_per_frame (e.g. 64) is fixed and far smaller than
-    /// bin_count (e.g. 513/2049), this is a small fixed-size vector regardless of FFT size.
-    previous_phases: Vec<f32>,
+    previous_phases: Vec<f32>, // Phase accumulator state, indexed by peak index within a frame
     last_pitch_ratio: f32,
 }
 
@@ -34,17 +34,9 @@ impl<T: Simd> SpectralVoice<T> {
         trigger_note: u8,
         sample_rate: f32,
     ) -> Self {
-        // Sized to peaks_per_frame, not fft_size/2+1 — phase tracking is per selected
-        // peak, not per dense FFT bin.
         let peak_count = sample_data.peaks_per_frame;
-        // Initialize last_pitch_ratio from the same formula used in
-        // spectral_generate_template, so the FIRST block (before
-        // spectral_generate_template has run even once for this voice)
-        // already has a correct value rather than defaulting to 1.0,
-        // which would be wrong for any pitch-shifted note and cause
-        // a one-block envelope-rate glitch at note-on.
-        let note_diff = trigger_note as f32 - root_note as f32;
-        let base_pitch_ratio = (note_diff / 12.0_f32).exp2();
+        let note_diff = trigger_note - root_note;
+        let base_pitch_ratio = (note_diff as f32 / 12.0).exp2();
         let sample_rate_scaling = sample_data.original_sample_rate as f32 / sample_rate;
         let initial_pitch_ratio = base_pitch_ratio * 1.0 * sample_rate_scaling; /* current_pitch_bend starts at 1.0 */ 
         Self {
@@ -73,41 +65,14 @@ impl<T: Simd> SpectralVoice<T> {
         self.sample_rate = new_rate;
     }
 
-    pub fn spectral_group_key(&self) -> SpectralGroupKey {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        let phase_count = self.previous_phases.len().min(4);
-        for phase in self.previous_phases.iter().take(phase_count) {
-            phase.to_bits().hash(&mut hasher);
-        }
-
-        SpectralGroupKey {
-            sample_data_ptr: Arc::as_ptr(&self.sample_data) as usize,
-            root_note: self.root_note,
-            trigger_note: self.trigger_note,
-            current_frame_bits: self.current_frame.to_bits(),
-            current_pitch_bend_bits: self.current_pitch_bend.to_bits(),
-            phase_signature: hasher.finish(),
-        }
-    }
-
-    /// Builds the per-block complex spectrum template from this voice's currently
-    /// selected analysis peaks.
-    ///
-    /// Unlike the previous dense implementation, this iterates ONLY the peaks stored
-    /// for the current frame (typically ~64) rather than every FFT bin (typically
-    /// 513-2049). Each peak carries its own `frequency` (in Hz, computed at analysis
-    /// time), which is converted directly to a target bin index after applying the
-    /// pitch ratio — there is no "source bin index" lookup, because the peak array is
-    /// sparse and not addressable by bin index.
-    pub fn spectral_generate_template(
+    pub fn spectral_process_voice(
         &mut self,
-        template_bins: &mut [Complex<f32>],
+        scratch: &mut Vec<(usize, Complex<f32>)>,
         fft_size: usize,
         fft_step: usize,
         bin_count: usize,
     ) {
-        // Clear only once — peaks write sparsely, so anything not touched must be zero.
-        template_bins.fill(Complex::new(0.0, 0.0));
+        scratch.clear();
 
         let frame_idx = self.current_frame as usize;
         if frame_idx >= self.sample_data.total_frames {
@@ -124,8 +89,6 @@ impl<T: Simd> SpectralVoice<T> {
         let sample_rate_scaling = self.sample_data.original_sample_rate as f32 / self.sample_rate;
         let total_pitch_ratio = base_pitch_ratio * self.current_pitch_bend * sample_rate_scaling;
         self.last_pitch_ratio = total_pitch_ratio;
-        // Hz-per-bin in the OUTPUT spectrum (pipeline's fft_size/sample_rate), used to
-        // convert a peak's (pitch-shifted) frequency into a target bin index.
         let output_bin_hz = self.sample_rate / fft_size as f32;
 
         // Expected phase advance per hop for a sinusoid at a given frequency:
@@ -146,14 +109,24 @@ impl<T: Simd> SpectralVoice<T> {
 
             // Pitch-shift the peak's frequency directly.
             let shifted_freq = peak.frequency * total_pitch_ratio;
-
+            if shifted_freq < output_bin_hz * 0.5 {
+                continue;
+            }
             // Map to target bin in the OUTPUT spectrum.
             let target_bin_exact = shifted_freq / output_bin_hz;
-            let target_bin = target_bin_exact.round() as usize;
+            // fractional interpolation across neighboring bins
+            let lo_f = target_bin_exact.floor();
+            let frac = target_bin_exact - lo_f;
+            if lo_f.is_nan() {
+                continue;
+            }
+            let lo = lo_f as isize;
+            let hi = lo + 1;
+            /*let target_bin = target_bin_exact.round() as usize;
 
             if target_bin >= bin_count {
                 continue;
-            }
+            }*/
 
             // Phase vocoder: predict phase advance for this peak's (shifted) frequency
             // over one hop, then unwrap against the previous true phase for this peak slot.
@@ -182,42 +155,26 @@ impl<T: Simd> SpectralVoice<T> {
 
             let (sin_p, cos_p) = true_phase.sin_cos();
 
-            // Multiple peaks (from different voices in a group, or even from the same
-            // voice if pitch-shifting causes two source peaks to collide on one output
-            // bin) can target the same bin — accumulate rather than overwrite.
-            template_bins[target_bin] +=
-                Complex::new(peak.magnitude * cos_p, peak.magnitude * sin_p);
+            let contrib = Complex::new(peak.magnitude * cos_p, peak.magnitude * sin_p);
+
+            // distribute to lo and hi bins proportionally
+            if lo >= 0 && (lo as usize) < bin_count {
+                let c = contrib * (1.0 - frac);
+                scratch.push((lo as usize, c));
+            }
+            if hi >= 0 && (hi as usize) < bin_count {
+                let c = contrib * frac;
+                scratch.push((hi as usize, c));
+            }
         }
 
-        self.current_frame += total_pitch_ratio;
+        self.current_frame += 1.0;
     }
 
-    pub fn copy_spectral_state_from(&mut self, source: &Self) {
-        self.current_frame = source.current_frame;
-        self.previous_phases
-            .copy_from_slice(&source.previous_phases);
-        self.last_pitch_ratio = source.last_pitch_ratio;
-    }
-
-    pub fn spectral_state_snapshot(&self) -> SpectralStateSnapshot {
-        SpectralStateSnapshot {
-            current_frame: self.current_frame,
-            previous_phases: self.previous_phases.clone(),
-            last_pitch_ratio: self.last_pitch_ratio,
-        }
-    }
-
-    pub fn spectral_apply_state_snapshot(&mut self, snapshot: &SpectralStateSnapshot) {
-        self.current_frame = snapshot.current_frame;
-        self.previous_phases
-            .copy_from_slice(&snapshot.previous_phases);
-        self.last_pitch_ratio = snapshot.last_pitch_ratio;
-    }
-
-    pub fn spectral_advance_gain(&mut self, velocity: u8, fft_step: usize) -> f32 {
+    pub fn get_spectral_gain(&mut self, velocity: u8, fft_step: usize) -> f32 {
         let g_start = self.envelope.get_value_at_current_time();
-        let envelope_steps = (fft_step as f32 * self.last_pitch_ratio).round().max(0.0) as usize;
-        for _ in 0..envelope_steps {
+        //let envelope_steps = (fft_step as f32 * self.last_pitch_ratio).round().max(0.0) as usize;
+        for _ in 0..fft_step {
             let _ = self.envelope.next_sample();
         }
         let g_end = self.envelope.get_value_at_current_time();
@@ -270,41 +227,19 @@ impl<T: Simd> SpectralVoiceSampleGenerator for SpectralVoice<T> {
     }
 
     #[inline(always)]
-    fn spectral_group_key(&self) -> SpectralGroupKey {
-        SpectralVoice::spectral_group_key(self)
-    }
-
-    #[inline(always)]
-    fn spectral_generate_template(
+    fn spectral_process_voice(
         &mut self,
-        template_bins: &mut [rustfft::num_complex::Complex<f32>],
+        scratch: &mut Vec<(usize, rustfft::num_complex::Complex<f32>)>,
         fft_size: usize,
         fft_step: usize,
         bin_count: usize,
     ) {
-        self.spectral_generate_template(template_bins, fft_size, fft_step, bin_count);
+        self.spectral_process_voice(scratch, fft_size, fft_step, bin_count);
     }
 
     #[inline(always)]
-    fn spectral_copy_state_from(&mut self, source: &dyn SpectralVoiceSampleGenerator) {
-        if let Some(source) = source.as_any().downcast_ref::<SpectralVoice<T>>() {
-            self.copy_spectral_state_from(source);
-        }
-    }
-
-    #[inline(always)]
-    fn spectral_state_snapshot(&self) -> SpectralStateSnapshot {
-        SpectralVoice::spectral_state_snapshot(self)
-    }
-
-    #[inline(always)]
-    fn spectral_apply_state_snapshot(&mut self, snapshot: &SpectralStateSnapshot) {
-        SpectralVoice::spectral_apply_state_snapshot(self, snapshot);
-    }
-
-    #[inline(always)]
-    fn spectral_advance_gain(&mut self, velocity: u8, fft_step: usize) -> f32 {
-        self.spectral_advance_gain(velocity, fft_step)
+    fn get_spectral_gain(&mut self, velocity: u8, fft_step: usize) -> f32 {
+        self.get_spectral_gain(velocity, fft_step)
     }
 
     #[inline(always)]
