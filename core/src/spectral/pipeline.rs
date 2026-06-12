@@ -69,7 +69,7 @@ impl<T: Simd> SpectralPipeline<T> {
         &self.config
     }
 
-    pub fn drain_into(&mut self, out_buffer: &mut [f32], active_voices: &mut [&mut dyn Voice]) {
+    pub fn drain_into_pipeline(&mut self, out_buffer: &mut [f32], active_voices: &mut [&mut dyn Voice]) {
         let mut filled = 0;
         while filled < out_buffer.len() {
             if self.ring_buffer.is_empty() {
@@ -105,19 +105,19 @@ impl<T: Simd> SpectralPipeline<T> {
             let velocity = voice_ref.velocity();
             if let Some(spectral_voice) = voice_ref.as_spectral_voice_mut() {
                 spectral_voice.update_host_sample_rate(self.sample_rate);
+                
+                let gain = spectral_voice.get_spectral_gain(velocity, fft_step);
+                if gain == 0.0 { continue; }
                 spectral_voice.spectral_process_voice(
                     &mut self.template_scratch,
                     fft_size,
                     fft_step,
                     bin_count,
                 );
-                let gain = spectral_voice.get_spectral_gain(velocity, fft_step);
-                if gain != 0.0 {
-                    for (bin_idx, c) in self.template_scratch.iter() {
-                        // explicit scalar multiply to avoid relying on trait impls
-                        let scaled = Complex::new(c.re * gain, c.im * gain);
-                        self.complex_accumulator[*bin_idx] += scaled;
-                    }
+                for (bin_idx, c) in self.template_scratch.iter() {
+                    // explicit scalar multiply to avoid relying on trait impls
+                    let scaled = Complex::new(c.re * gain, c.im * gain);
+                    self.complex_accumulator[*bin_idx] += scaled;
                 }
             }
         }
@@ -223,7 +223,7 @@ mod tests {
         // Render ~1 second of audio
         let mut output = vec![0.0f32; sample_rate as usize];
         let mut voices: Vec<&mut dyn Voice> = vec![&mut voice];
-        pipeline.drain_into(&mut output, &mut voices);
+        pipeline.drain_into_pipeline(&mut output, &mut voices);
 
         // --- Assertions ---
 

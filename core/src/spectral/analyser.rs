@@ -397,9 +397,9 @@ pub fn analyze_pcm_sample(
             let base_threshold_db: f32 = -60.0;
             // Low-frequency boost (makes threshold more permissive below low_freq_cut)
             let low_freq_cut: f32 = 200.0;
-            let low_freq_boost_db: f32 = 12.0; // up to +12 dB at DC, tapering to 0 at low_freq_cut
+            let low_freq_boost_db: f32 = 15.0; // up to +12 dB at DC, tapering to 0 at low_freq_cut
             // Bin floor multipliers (vary with frequency)
-            let low_bin_floor_mult: f32 = 0.6;
+            let low_bin_floor_mult: f32 = 0.5;
             let mid_bin_floor_mult: f32 = 0.9;
             let high_bin_floor_mult: f32 = 1.5;
 

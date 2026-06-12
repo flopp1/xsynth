@@ -237,7 +237,7 @@ impl VoiceChannel {
             }
 
             // 5. Pass our short-lived references into the pipeline execution pass
-            pipeline.drain_into(out, &mut active_references);
+            pipeline.drain_into_pipeline(out, &mut active_references);
 
             // 6. Mirror active counts to the global AtomicU64 statistics tracker
             let active_count = buffer.voice_count();
