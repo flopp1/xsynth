@@ -108,7 +108,7 @@ impl<T: Simd> SpectralPipeline<T> {
 
         self.fft_plans.execute_inverse(&mut self.ifft_buffer);
 
-        // Fused Extraction, Windowing, and Overlap-Add
+        // Fused Extraction, Windowing, and Overlap-Add (normalisation unneeded since Goertzel's output is scaled correctly for IFFT already)
         self.fft_plans.window_and_overlap_add(&self.ifft_buffer, &mut self.overlap_buffer);
 
         // Push exactly fft_step samples to the ring buffer.

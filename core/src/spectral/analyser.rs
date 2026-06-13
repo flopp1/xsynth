@@ -25,6 +25,31 @@ impl AnalyzedSample {
     }
 }
 
+fn cubic_maximize(y0: f32, y1: f32, y2: f32, y3: f32, max_val: &mut f32) -> f32 {
+    let a = y0 / -6.0 + y1 / 2.0 - y2 / 2.0 + y3 / 6.0;
+    let b = y0 - 5.0 * y1 / 2.0 + 2.0 * y2 - y3 / 2.0;
+    let c = -11.0 * y0 / 6.0 + 3.0 * y1 - 3.0 * y2 / 2.0 + y3 / 3.0;
+    let d = y0;
+
+    let da = 3.0 * a;
+    let db = 2.0 * b;
+    let dc = c;
+
+    let discriminant = db * db - 4.0 * da * dc;
+    if discriminant < 0.0 {
+        *max_val = -1.0;
+        return -1.0;
+    }
+    let x1 = (-db + discriminant.sqrt()) / (2.0 * da);
+    let x2 = (-db - discriminant.sqrt()) / (2.0 * da);
+
+    let dda = 2.0 * da;
+    let ddb = db;
+
+    let chosen = if dda * x1 + ddb < 0.0 { x1 } else { x2 };
+    *max_val = a * chosen * chosen * chosen + b * chosen * chosen + c * chosen + d;
+    chosen
+}
 
 /// Consumes raw resampled PCM arrays and produces a fixed set of harmonic tracks.
 pub fn analyze_pcm_sample(
@@ -70,11 +95,8 @@ pub fn analyze_pcm_sample(
     let mut fft_buffer = vec![Complex::new(0.0f32, 0.0f32); fft_size];
     let scratch_len = fft_plans.forward_plan.get_inplace_scratch_len();
     let mut scratch_buffer = vec![Complex::new(0.0f32, 0.0f32); scratch_len];
-
     let delta_f = original_sample_rate as f32 / fft_size as f32;
-    let magnitude_threshold_db = -60.0;
-    let semitone_ratio = 2f32.powf(1.0 / 12.0);
-    const MAG_FLOOR: f32 = 1e-12;
+    //let semitone_ratio = 2f32.powf(1.0 / 12.0);
 
     // --- Helper: run one frame's FFT on the mono-summed signal, writing into fft_buffer ---
     let compute_frame_fft = |frame_idx: usize, fft_buffer: &mut [Complex<f32>], scratch_buffer: &mut [Complex<f32>]| {
@@ -106,85 +128,128 @@ pub fn analyze_pcm_sample(
         fft_plans.forward_plan.process_with_scratch(fft_buffer, scratch_buffer);
     };
 
-    // ===================== PASS 1: harmonic detection on a representative frame =====================
-    //
-    // Pick a frame in early-to-mid sustain — skips the attack transient (where the
-    // spectrum is broadband/noisy and not representative of the note's harmonic
-    // series) and lands where the signal is strong and harmonically clean.
-    let representative_frame = (total_frames / 4).min(total_frames.saturating_sub(1));
-
-    compute_frame_fft(representative_frame, &mut fft_buffer, &mut scratch_buffer);
-
-    let mut magnitudes: Vec<f32> = vec![0.0; bin_count];
-    let mut log_magnitudes: Vec<f32> = vec![0.0; bin_count];
-    let mut phases: Vec<f32> = vec![0.0; bin_count];
-
+    // Find the frame with maximum total power, after skipping an initial
+    // attack-exclusion window (e.g., first ~50ms).
+    let attack_exclude_seconds = 0.05; // ~50ms — tune if attacks are longer/shorter
+    let attack_exclude_frames = ((attack_exclude_seconds * original_sample_rate as f32) / fft_step as f32)
+        .ceil() as usize;
+ 
+    let scan_start = attack_exclude_frames.min(total_frames.saturating_sub(1));
+ 
+    let mut best_frame = scan_start;
+    let mut best_power = f32::NEG_INFINITY;
+ 
+    for frame_idx in scan_start..total_frames {
+        compute_frame_fft(frame_idx, &mut fft_buffer, &mut scratch_buffer);
+        let power: f32 = (0..bin_count)
+            .map(|b| {
+                let c = fft_buffer[b];
+                c.re * c.re + c.im * c.im
+            })
+            .sum();
+        if power > best_power {
+            best_power = power;
+            best_frame = frame_idx;
+        }
+    }
+ 
+    compute_frame_fft(best_frame, &mut fft_buffer, &mut scratch_buffer);
+ 
+    let half = fft_size / 2;
+    let mut power: Vec<f32> = vec![0.0; bin_count];
+    let mut re: Vec<f32> = vec![0.0; bin_count];
+    let mut im: Vec<f32> = vec![0.0; bin_count];
+ 
     for bin_idx in 0..bin_count {
         let c = fft_buffer[bin_idx];
-        let mag = (c.re * c.re + c.im * c.im).sqrt();
-        magnitudes[bin_idx] = mag;
-        log_magnitudes[bin_idx] = mag.max(MAG_FLOOR).log10();
-        phases[bin_idx] = c.im.atan2(c.re);
+        power[bin_idx] = c.re * c.re + c.im * c.im;
+        re[bin_idx] = c.re;
+        im[bin_idx] = c.im;
     }
+ 
+    let magnitude_threshold = 10f32.powf(-60.0 / 10.0); // -60dB threshold
+ 
+    // Peak detection on raw (unweighted) power 
+    let mut peaks: Vec<(f32, f32, f32)> = Vec::new(); // (freq_hz, phase_rad, magnitude_linear)
+ 
+    if bin_count > 4 {
+        let mut up = power[1] > power[0];
+        // Audacity's loop: bin = 3 .. half-1
+        for bin in 3..(half - 1) {
+            let now_up = power[bin] > power[bin - 1];
+            if !now_up && up {
+                let leftbin = bin - 2;
+                let mut value_at_max = 0.0f32;
+                let offset = cubic_maximize(
+                    power[leftbin],
+                    power[leftbin + 1],
+                    power[leftbin + 2],
+                    power[leftbin + 3],
+                    &mut value_at_max,
+                );
+ 
+                if offset.is_finite() && value_at_max.is_finite() && offset >= -0.5 {
+                    if value_at_max < magnitude_threshold {
+                        up = now_up;
+                        continue;
+                    }
+ 
+                    let refined_bin = leftbin as f32 + offset;
+                    let freq = refined_bin * delta_f;
+ 
+                    // Phase via linear interpolation of the complex spectrum around the
+                    // refined (sub-bin) peak position.
+                    let bin_floor = refined_bin.floor() as isize;
+                    let phase = if bin_floor >= 0 && (bin_floor as usize) + 1 < bin_count {
+                        let b0 = bin_floor as usize;
+                        let frac = refined_bin - b0 as f32;
+                        let interp_re = re[b0] * (1.0 - frac) + re[b0 + 1] * frac;
+                        let interp_im = im[b0] * (1.0 - frac) + im[b0 + 1] * frac;
+                        interp_im.atan2(interp_re)
+                    } else {
+                        let idx = refined_bin.round().clamp(0.0, (bin_count - 1) as f32) as usize;
+                        im[idx].atan2(re[idx])
+                    };
+ 
+                    peaks.push((freq, phase, value_at_max));
+                }
+            }
+            up = now_up;
+        }
+    }
+    let eps = delta_f.max(1.0);
+    let bias_exponent = 0.6_f32; // tune 0.3..1.0 — higher = stronger low-frequency bias
+ 
+    let weighted_magnitude = |freq: f32, mag: f32| -> f32 {
+        let weight = 1.0 / (freq + eps).powf(bias_exponent);
+        mag * weight
+    };
 
-    let mut sorted_bins: Vec<usize> = (0..bin_count).collect();
-    sorted_bins.sort_unstable_by(|&a, &b| {
-        magnitudes[b].partial_cmp(&magnitudes[a]).unwrap_or(std::cmp::Ordering::Equal)
+    peaks.sort_unstable_by(|a, b| {
+        let wa = weighted_magnitude(a.0, a.2);
+        let wb = weighted_magnitude(b.0, b.2);
+        f32::total_cmp(&wb, &wa)
     });
 
-    // Selected (frequency, phase) pairs — magnitude from this pass is discarded;
-    // pass 2 derives the actual per-frame magnitude curve.
+    let semitone_ratio = 2f32.powf(1.0 / 12.0);
+ 
     let mut selected: Vec<(f32, f32)> = Vec::with_capacity(harmonic_count); // (frequency, phase)
-
-    for &idx in sorted_bins.iter() {
+ 
+    for &(freq, phase, _weighted_mag) in peaks.iter() {
         if selected.len() >= harmonic_count {
             break;
         }
-
-        let mag = magnitudes[idx];
-        let mag_db = 20.0 * mag.max(MAG_FLOOR).log10();
-        if mag_db < magnitude_threshold_db {
-            break; // sorted descending — everything after this is also below floor
-        }
-
-        let raw_freq = idx as f32 * delta_f;
-        let min_dist = (raw_freq * (semitone_ratio - 1.0)).max(delta_f * 1.5);
-
-        if selected.iter().any(|&(f, _)| (f - raw_freq).abs() < min_dist) {
+ 
+        let min_dist = (freq * (semitone_ratio - 1.0)).max(delta_f * 1.5);
+ 
+        if selected.iter().any(|&(f, _)| (f - freq).abs() < min_dist) {
             continue;
         }
-
-        // Parabolic interpolation on log-magnitude for sub-bin frequency accuracy.
-        let (refined_freq, refined_phase) = if idx > 0 && idx < bin_count - 1 {
-            let alpha = log_magnitudes[idx - 1];
-            let beta = log_magnitudes[idx];
-            let gamma = log_magnitudes[idx + 1];
-            let denom = alpha - 2.0 * beta + gamma;
-
-            let p = if denom.abs() > f32::EPSILON {
-                (0.5 * (alpha - gamma) / denom).clamp(-0.5, 0.5)
-            } else {
-                0.0
-            };
-
-            let interp_freq = (idx as f32 + p) * delta_f;
-            let interp_phase = if p >= 0.0 {
-                phases[idx] * (1.0 - p) + phases[idx + 1] * p
-            } else {
-                phases[idx] * (1.0 + p) + phases[idx - 1] * (-p)
-            };
-
-            (interp_freq, interp_phase)
-        } else {
-            (raw_freq, phases[idx])
-        };
-
-        selected.push((refined_freq, refined_phase));
+ 
+        selected.push((freq, phase));
     }
 
-    // Pad to exactly harmonic_count with inert entries (frequency=0, magnitude
-    // curve all zero) — spectral_process_voice's `magnitude <= 0.0` check skips
-    // these, same as the old zero-padded Bin scheme.
+    // Pad to harmonic_count with inert entries
     while selected.len() < harmonic_count {
         selected.push((0.0, 0.0));
     }
@@ -250,8 +315,8 @@ pub fn analyze_pcm_sample(
 
             let mag_squared = q1 * q1 + q2 * q2 - q1 * q2 * coeff;
         
-            // Guard against tiny negative floating-point anomalies before sqrt, 2.0 since IFFT produces unscaled peak mag of Complex*2/fft_size (so we also eliminate the need for normalisation)
-            let mag = if mag_squared > 0.0 { mag_squared.sqrt() * 2.0 / goertzel_window_size as f32 } else { 0.0 };
+            // Guard against tiny negative floating-point anomalies before sqrt
+            let mag = if mag_squared > 0.0 { mag_squared.sqrt() / goertzel_window_size as f32 / 4.0 } else { 0.0 };
 
             magnitude_curves[h][sample_idx] = mag;
         }

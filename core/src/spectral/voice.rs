@@ -79,7 +79,7 @@ impl<T: Simd> SpectralVoice<T> {
 
         let note_diff = self.trigger_note as f32 - self.root_note as f32;
         let base_pitch_ratio = (note_diff / 12.0_f32).exp2();
-        let sample_rate_scaling = self.sample_data.original_sample_rate as f32 / self.sample_rate;
+        let sample_rate_scaling = self.sample_rate / self.sample_data.original_sample_rate as f32;
         let total_pitch_ratio = base_pitch_ratio * self.current_pitch_bend * sample_rate_scaling;
         self.last_pitch_ratio = total_pitch_ratio;
         let output_bin_hz = self.sample_rate / fft_size as f32;
@@ -97,12 +97,6 @@ impl<T: Simd> SpectralVoice<T> {
                 continue;
             }
             let shifted_freq = harmonic.frequency * total_pitch_ratio;
- 
-            // Skip near-DC pile-up from heavily downward-shifted low-frequency
-            // content (the bass-floor fix from earlier).
-            //if shifted_freq < output_bin_hz * 0.5 {
-            //    continue;
-            //}
  
             let target_bin = shifted_freq / output_bin_hz;
             let lo_f = target_bin.floor();
