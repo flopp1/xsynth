@@ -21,6 +21,7 @@ pub struct Settings {
     spectral_fft_size: usize,
     spectral_max_peaks_per_frame: usize,
     fft_step: usize,
+    magnitude_res: usize
 }
 
 impl Default for Settings {
@@ -37,6 +38,7 @@ impl Default for Settings {
             spectral_fft_size: 8192,
             spectral_max_peaks_per_frame: 32,
             fft_step: 2048,
+            magnitude_res: 48
         }
     }
 }
@@ -54,6 +56,7 @@ impl Settings {
                 max_voices: self.layers,
                 enable_phase_fade_out: self.fade_out_killing,
                 max_peaks_per_frame: self.spectral_max_peaks_per_frame,
+                magnitude_res: self.magnitude_res
             })
         } else {
             None

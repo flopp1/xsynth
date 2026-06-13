@@ -37,6 +37,7 @@ pub fn main() {
         max_voices: Some(layer_count),
         enable_phase_fade_out: true,
         max_peaks_per_frame: 16, // Limit the number of peaks to retain per frame for performance
+        magnitude_res: 48
     };
 
     let soundfonts: Vec<Arc<dyn SoundfontBase>> = vec![Arc::new(

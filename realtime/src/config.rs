@@ -61,6 +61,7 @@ impl Default for XSynthRealtimeConfig {
                 enable_phase_fade_out: true,
                 max_peaks_per_frame: 32, // Default value, can be adjusted as needed
                 fft_step: 2048,          // Default FFT step size
+                magnitude_res: 48,
             }),
         }
     }

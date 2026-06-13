@@ -127,8 +127,11 @@ impl State {
                 .value_parser(int_parser),
             Arg::new("max peaks per frame")
                 .long("max-peaks")
-                .help("Maximum number of peaks to retain per frame for spectral processing.\nDefault: 32")
+                .help("Maximum number of frequencies to retain for spectral processing.\nDefault: 32")
                 .value_parser(int_parser),
+            Arg::new("magnitude time-resolution")
+                .long("mag-res")
+                .help("Time-resolution in samples for magnitude curve. Dependent on sample rate, beware.\nDefault: 24")
         ])
     }
 
@@ -173,10 +176,9 @@ impl State {
 
             let fft_step = matches.get_one::<u32>("fft step").copied().unwrap_or(2048) as usize;
 
-            let max_peaks_per_frame = matches
-                .get_one::<u32>("max peaks per frame")
-                .copied()
-                .unwrap_or(32) as usize;
+            let max_peaks_per_frame = matches.get_one::<u32>("max peaks per frame").copied().unwrap_or(32) as usize;
+
+            let magnitude_res = matches.get_one::<u32>("magnitude time-resolution").copied().unwrap_or(32) as usize;
 
             Some(SpectralConfig {
                 fft_size,
@@ -184,6 +186,7 @@ impl State {
                 max_voices: layer_limit,
                 enable_phase_fade_out: disable_fade_out,
                 max_peaks_per_frame,
+                magnitude_res,
             })
         } else {
             None

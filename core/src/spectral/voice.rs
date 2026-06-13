@@ -2,7 +2,7 @@ use rustfft::num_complex::Complex;
 use simdeez::prelude::*;
 use std::sync::Arc;
 
-use super::AnalyzedSample;
+use super::{AnalyzedSample};
 use crate::voice::{
     ReleaseType, 
     SIMDVoiceEnvelope, 
@@ -22,7 +22,6 @@ pub struct SpectralVoice<T: Simd> {
     sample_rate: f32,
     current_volume: f32,
     current_pitch_bend: f32,
-    previous_phases: Vec<f32>, // Phase accumulator state, indexed by peak index within a frame
     last_pitch_ratio: f32,
 }
 
@@ -34,7 +33,6 @@ impl<T: Simd> SpectralVoice<T> {
         trigger_note: u8,
         sample_rate: f32,
     ) -> Self {
-        let peak_count = sample_data.peaks_per_frame;
         let note_diff = trigger_note - root_note;
         let base_pitch_ratio = (note_diff as f32 / 12.0).exp2();
         let sample_rate_scaling = sample_data.original_sample_rate as f32 / sample_rate;
@@ -48,7 +46,6 @@ impl<T: Simd> SpectralVoice<T> {
             sample_rate,
             current_volume: 1.0,
             current_pitch_bend: 1.0,
-            previous_phases: vec![0.0; peak_count],
             last_pitch_ratio: initial_pitch_ratio,
         }
     }
@@ -71,18 +68,14 @@ impl<T: Simd> SpectralVoice<T> {
         fft_size: usize,
         fft_step: usize,
         bin_count: usize,
+        magnitude_res: usize,
     ) {
         scratch.clear();
 
         let frame_idx = self.current_frame as usize;
-        if frame_idx >= self.sample_data.total_frames {
+        if frame_idx >= self.sample_data.total_goertzel_samples {
             return;
         }
-
-        let current_frame_peaks = match self.sample_data.get_frame_slice(0, frame_idx) {
-            Some(slice) => slice,
-            None => return,
-        };
 
         let note_diff = self.trigger_note as f32 - self.root_note as f32;
         let base_pitch_ratio = (note_diff / 12.0_f32).exp2();
@@ -91,84 +84,48 @@ impl<T: Simd> SpectralVoice<T> {
         self.last_pitch_ratio = total_pitch_ratio;
         let output_bin_hz = self.sample_rate / fft_size as f32;
 
-        // Expected phase advance per hop for a sinusoid at a given frequency:
-        // delta_phase = 2*pi * freq * (fft_step / sample_rate)
-        //let hop_seconds = fft_step as f32 / self.sample_rate;
-
-        // previous_phases is indexed by PEAK SLOT (0..peaks_per_frame), not by bin.
-        // If the analysis stored fewer peaks for this frame than peaks_per_frame
-        // (e.g. a quiet frame with few bins above the noise floor), the unused
-        // slots simply retain stale phase values that are never read.
-        for (peak_idx, peak) in current_frame_peaks.iter().enumerate() {
-            // A zero-magnitude peak means this slot was unused for this frame
-            // (analysis pads to peaks_per_frame with empty Bins). Skip it —
-            // writing a zero-magnitude contribution is harmless but wasted work.
-            if peak.magnitude <= 0.0 {
+        for (_, harmonic) in self.sample_data.harmonics.iter().enumerate() {
+            let magnitude = harmonic.magnitude_curve[frame_idx];
+            // frequency == 0.0 marks an inert/padding harmonic
+            if harmonic.frequency <= 0.0 {
+                continue;
+            } 
+            if magnitude <= 0.0 {
                 continue;
             }
-
-            // Pitch-shift the peak's frequency directly.
-            let shifted_freq = peak.frequency * total_pitch_ratio;
-            if shifted_freq < output_bin_hz * 0.5 {
+            if frame_idx >= harmonic.magnitude_curve.len() {
                 continue;
             }
-            // Map to target bin in the OUTPUT spectrum.
-            let target_bin_exact = shifted_freq / output_bin_hz;
-            // fractional interpolation across neighboring bins
-            let lo_f = target_bin_exact.floor();
-            let frac = target_bin_exact - lo_f;
+            let shifted_freq = harmonic.frequency * total_pitch_ratio;
+ 
+            // Skip near-DC pile-up from heavily downward-shifted low-frequency
+            // content (the bass-floor fix from earlier).
+            //if shifted_freq < output_bin_hz * 0.5 {
+            //    continue;
+            //}
+ 
+            let target_bin = shifted_freq / output_bin_hz;
+            let lo_f = target_bin.floor();
             if lo_f.is_nan() {
                 continue;
             }
+            let frac = target_bin - lo_f;
             let lo = lo_f as isize;
             let hi = lo + 1;
-            /*let target_bin = target_bin_exact.round() as usize;
-
-            if target_bin >= bin_count {
-                continue;
-            }*/
-
-            // Phase vocoder: predict phase advance for this peak's (shifted) frequency
-            // over one hop, then unwrap against the previous true phase for this peak slot.
-            //let expected_phase_step = 2.0 * std::f32::consts::PI * shifted_freq * hop_seconds;
-            //let expected = self.previous_phases[peak_idx] + expected_phase_step;
-
-            //let raw_phase = peak.phase;
-            //let delta = raw_phase - (self.previous_phases[peak_idx]
-            //    - expected_phase_step * (frame_idx as f32 - 1.0).max(0.0));
-            //let delta = delta - (delta / (2.0 * std::f32::consts::PI)).round() * 2.0 * std::f32::consts::PI;
-            //let true_phase = expected + delta;
-            //self.previous_phases[peak_idx] = true_phase;
-            //end of phase vocoder
-
-            //direct phase tracking without explicit unwrapping — relies on high overlap
-            //to keep phase changes between frames small and consistent.
-            //This is more robust to inharmonicity and non-linear pitch shifts,
-            //at the cost of potentially less accurate phase tracking at low FFT sizes and low frequencies.
-            // In SpectralVoice, replace previous_phases usage with per-peak running phase
-            // driven by the SHIFTED frequency, advanced by one hop's worth of phase per block:
-            let phase_increment =
-                2.0 * std::f32::consts::PI * shifted_freq * (fft_step as f32 / self.sample_rate);
-            self.previous_phases[peak_idx] =
-                (self.previous_phases[peak_idx] + phase_increment) % (2.0 * std::f32::consts::PI);
-            let true_phase = self.previous_phases[peak_idx];
-
-            let (sin_p, cos_p) = true_phase.sin_cos();
-
-            let contrib = Complex::new(peak.magnitude * cos_p, peak.magnitude * sin_p);
-
-            // distribute to lo and hi bins proportionally
+ 
+            let current_time_samples = frame_idx * magnitude_res;
+            let phase = harmonic.phase_at_origin + 2.0 * std::f32::consts::PI * shifted_freq * (current_time_samples as f32 / self.sample_rate);
+            let (sin_p, cos_p) = phase.sin_cos();
+            let contrib = Complex::new(magnitude * cos_p, magnitude * sin_p);
+ 
             if lo >= 0 && (lo as usize) < bin_count {
-                let c = contrib * (1.0 - frac);
-                scratch.push((lo as usize, c));
+                scratch.push((lo as usize, contrib * (1.0 - frac)));
             }
             if hi >= 0 && (hi as usize) < bin_count {
-                let c = contrib * frac;
-                scratch.push((hi as usize, c));
+                scratch.push((hi as usize, contrib * frac));
             }
         }
-
-        self.current_frame += 1.0;
+        self.current_frame += fft_step as f32 / magnitude_res as f32;
     }
 
     pub fn get_spectral_gain(&mut self, velocity: u8, fft_step: usize) -> f32 {
@@ -185,7 +142,7 @@ impl<T: Simd> SpectralVoice<T> {
 impl<T: Simd> VoiceGeneratorBase for SpectralVoice<T> {
     #[inline(always)]
     fn ended(&self) -> bool {
-        self.envelope.ended() || (self.current_frame as usize) >= self.sample_data.total_frames
+        self.envelope.ended() || (self.current_frame as usize) >= self.sample_data.total_goertzel_samples
     }
 
     #[inline(always)]
@@ -233,8 +190,9 @@ impl<T: Simd> SpectralVoiceSampleGenerator for SpectralVoice<T> {
         fft_size: usize,
         fft_step: usize,
         bin_count: usize,
+        magnitude_res: usize,
     ) {
-        self.spectral_process_voice(scratch, fft_size, fft_step, bin_count);
+        self.spectral_process_voice(scratch, fft_size, fft_step, bin_count, magnitude_res);
     }
 
     #[inline(always)]

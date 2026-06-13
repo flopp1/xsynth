@@ -55,6 +55,7 @@ fn criterion_benchmark(c: &mut Criterion) {
         max_voices: Some(layer_count),
         enable_phase_fade_out: true,
         max_peaks_per_frame: 16,
+        magnitude_res: 48
     };
 
     let soundfonts: Vec<Arc<dyn SoundfontBase>> = vec![Arc::new(

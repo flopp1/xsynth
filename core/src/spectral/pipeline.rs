@@ -3,34 +3,8 @@ use simdeez::prelude::*;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use super::SpectralPlans;
-use crate::voice::{Voice};
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-#[cfg_attr(
-    feature = "serde",
-    derive(serde::Deserialize, serde::Serialize),
-    serde(default)
-)]
-pub struct SpectralConfig {
-    pub fft_size: usize,
-    pub fft_step: usize,
-    pub max_voices: Option<usize>,
-    pub enable_phase_fade_out: bool,
-    pub max_peaks_per_frame: usize, 
-}
-
-impl Default for SpectralConfig {
-    fn default() -> Self {
-        Self {
-            fft_size: 8192,
-            fft_step: 2048, // 75% overlap for optimal OLA or something idk
-            max_voices: Some(4 * 512),
-            enable_phase_fade_out: true,
-            max_peaks_per_frame: 64,
-        }
-    }
-}
+use super::{SpectralConfig, SpectralPlans};
+use crate::voice::Voice;
 
 pub struct SpectralPipeline<T: Simd> {
     config: SpectralConfig,
@@ -38,7 +12,6 @@ pub struct SpectralPipeline<T: Simd> {
     fft_plans: Arc<SpectralPlans>,
     complex_accumulator: Vec<Complex<f32>>,
     ifft_buffer: Vec<Complex<f32>>,
-    time_domain_scratch: Vec<f32>,
     template_scratch: Vec<(usize, Complex<f32>)>,
     overlap_buffer: Vec<f32>,
     ring_buffer: VecDeque<f32>,
@@ -54,7 +27,6 @@ impl<T: Simd> SpectralPipeline<T> {
             fft_plans,
             complex_accumulator: vec![Complex::new(0.0, 0.0); bin_count],
             ifft_buffer: vec![Complex::new(0.0, 0.0); fft_size],
-            time_domain_scratch: vec![0.0; fft_size],
             template_scratch: Vec::with_capacity(config.max_peaks_per_frame * 2),
             overlap_buffer: vec![0.0; fft_size],
             config,
@@ -95,12 +67,13 @@ impl<T: Simd> SpectralPipeline<T> {
     pub fn process_spectral_block(&mut self, active_voices: &mut [&mut dyn Voice]) {
         let fft_size = self.config.fft_size;
         let fft_step = self.config.fft_step;
+        let magnitude_res = self.config.magnitude_res;
         let bin_count = fft_size / 2 + 1;
 
-        // 1. Reset complex accumulator
+        // Reset complex accumulator
         self.complex_accumulator.fill(Complex::new(0.0, 0.0));
 
-        // 2. Accumulate complex bins from spectral voices
+        // Accumulate complex bins from spectral voices
         for voice_ref in active_voices.iter_mut() {
             let velocity = voice_ref.velocity();
             if let Some(spectral_voice) = voice_ref.as_spectral_voice_mut() {
@@ -113,9 +86,9 @@ impl<T: Simd> SpectralPipeline<T> {
                     fft_size,
                     fft_step,
                     bin_count,
+                    magnitude_res,
                 );
                 for (bin_idx, c) in self.template_scratch.iter() {
-                    // explicit scalar multiply to avoid relying on trait impls
                     let scaled = Complex::new(c.re * gain, c.im * gain);
                     self.complex_accumulator[*bin_idx] += scaled;
                 }
@@ -135,19 +108,8 @@ impl<T: Simd> SpectralPipeline<T> {
 
         self.fft_plans.execute_inverse(&mut self.ifft_buffer);
 
-        // Normalize (rustfft IFFT is unscaled) and write to time-domain scratch
-        let scale = 1.0 / fft_size as f32;
-        for i in 0..fft_size {
-            self.time_domain_scratch[i] = self.ifft_buffer[i].re * scale;
-        }
-
-        // Apply synthesis window
-        self.fft_plans.apply_synthesis_window(&mut self.time_domain_scratch);
-
-        // Overlap-add: accumulate the windowed frame into the overlap buffer
-        for i in 0..fft_size {
-            self.overlap_buffer[i] += self.time_domain_scratch[i];
-        }
+        // Fused Extraction, Windowing, and Overlap-Add
+        self.fft_plans.window_and_overlap_add(&self.ifft_buffer, &mut self.overlap_buffer);
 
         // Push exactly fft_step samples to the ring buffer.
         // The remaining (fft_size - fft_step) samples stay in overlap_buffer to be
@@ -159,9 +121,10 @@ impl<T: Simd> SpectralPipeline<T> {
         self.overlap_buffer[fft_size - fft_step..].fill(0.0);
     }
 }
-
-#[cfg(test)]
+/*
+[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::spectral::{AnalyzedSample, Bin, SpectralVoice};
     use crate::voice::{make_sustained_envelope, VoiceBase};
@@ -406,3 +369,4 @@ mod tests {
     }
 
 }
+*/

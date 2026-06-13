@@ -62,12 +62,21 @@ impl SpectralPlans {
         self.inverse_plan.process(buffer);
     }
 
-    /// Applies the pre-calculated Hanning window to a time-domain grain slice.
+    /// Extracts the real part from the IFFT buffer, applies the Hanning window, and accumulates directly into the overlap buffer in a single vectorized pass.
     #[inline(always)]
-    pub fn apply_synthesis_window(&self, grain: &mut [f32]) {
-        debug_assert_eq!(grain.len(), self.fft_size);
-        for (sample, &win_coeff) in grain.iter_mut().zip(self.window.iter()) {
-            *sample *= win_coeff;
-        }
+    pub fn window_and_overlap_add(
+        &self, 
+        ifft_buffer: &[rustfft::num_complex::Complex<f32>], 
+        overlap_buffer: &mut [f32]
+    ) {
+        debug_assert_eq!(ifft_buffer.len(), self.fft_size);
+        debug_assert!(overlap_buffer.len() >= self.fft_size);
+        overlap_buffer[..self.fft_size]
+            .iter_mut()
+            .zip(ifft_buffer.iter())
+            .zip(self.window.iter())
+            .for_each(|((overlap_sample, complex_sample), &win_coeff)| {
+                *overlap_sample += complex_sample.re * win_coeff;
+            });
     }
 }

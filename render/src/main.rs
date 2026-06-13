@@ -58,7 +58,7 @@ fn main() {
     let elapsed = now.elapsed();
     thread::sleep(Duration::from_millis(200));
     eprintln!(
-        "soundfont loaded in {:?}. Initializing renderer...",
+        "Soundfont loaded in {:?}. Initializing renderer...",
         elapsed
     );
 
@@ -149,7 +149,7 @@ fn main() {
             } else {
                 0.0
             };
-            let smoothed = instant_speed.load(Ordering::Relaxed) * 0.9 + speed * 0.1;
+            let smoothed = instant_speed.load(Ordering::Relaxed) * 0.95 + speed * 0.05;
             instant_speed.store(smoothed, Ordering::Relaxed);
             //end of stats stuff
 

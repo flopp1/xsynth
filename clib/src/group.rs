@@ -103,6 +103,7 @@ pub extern "C" fn XSynth_ChannelGroup_Create(options: XSynth_GroupOptions) -> XS
             },
             enable_phase_fade_out: spec.enable_phase_fade_out,
             max_peaks_per_frame: spec.max_peaks_per_frame,
+            magnitude_res: spec.magnitude_res
         }),
     };
 

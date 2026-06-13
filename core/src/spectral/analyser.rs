@@ -1,19 +1,14 @@
 use std::sync::Arc;
 use rustfft::num_complex::Complex;
-use super::{Bin, SpectralConfig, SpectralPlans};
+use super::{HarmonicTrack, SpectralConfig, SpectralPlans};
 
-/// Represents an analyzed frequency snapshot for a voice asset, stored as a sparse
-/// set of the most prominent spectral peaks per frame rather than the full dense
-/// FFT bin range.
-///
-/// Memory layout: each frame contributes exactly `peaks_per_frame` entries
-/// (zero-padded if fewer real peaks were found), packed as:
-/// [Channel 0 Frame 0 (peaks_per_frame entries), Channel 0 Frame 1, ..., Channel 1 Frame 0, ...]
+/// Represents an analyzed frequency snapshot for an audio sample, containing fundemental harmonics and magnitude curve
 #[derive(Clone, Debug)]
 pub struct AnalyzedSample {
-    pub flat_peaks: Arc<[Bin]>,
+    pub harmonics: Arc<[HarmonicTrack]>,
     pub total_frames: usize,
-    pub peaks_per_frame: usize,
+    pub total_goertzel_samples: usize,
+    pub harmonic_count: usize,
     pub channels_count: usize,
     pub original_sample_rate: u32,
     pub fft_size: usize,
@@ -21,23 +16,6 @@ pub struct AnalyzedSample {
 }
 
 impl AnalyzedSample {
-    /// Returns the slice of (up to) `peaks_per_frame` peaks for the given channel/frame.
-    /// Entries with `magnitude == 0.0` are padding and represent "no peak in this slot".
-    #[inline(always)]
-    pub fn get_frame_slice(&self, channel: usize, frame_idx: usize) -> Option<&[Bin]> {
-        if channel >= self.channels_count || frame_idx >= self.total_frames {
-            return None;
-        }
-
-        let channel_stride = self.total_frames * self.peaks_per_frame;
-        let frame_stride = frame_idx * self.peaks_per_frame;
-
-        let start = (channel * channel_stride) + frame_stride;
-        let end = start + self.peaks_per_frame;
-
-        Some(&self.flat_peaks[start..end])
-    }
-
     pub fn duration_seconds(&self) -> f32 {
         if self.total_frames == 0 {
             return 0.0;
@@ -47,17 +25,277 @@ impl AnalyzedSample {
     }
 }
 
-/// Consumes raw resampled PCM arrays and maps them into a sparse frequency-peak
-/// representation: for each analysis frame, only the `max_peaks_per_frame` most
-/// prominent spectral peaks (by magnitude, above a noise floor, with a minimum
-/// semitone/bin spacing) are retained.
-///
-/// Each selected peak is refined via parabolic interpolation on the log-magnitude
-/// spectrum, giving sub-bin accurate frequency, magnitude, and phase estimates.
-/// This is an analysis-time-only cost (paid once per unique sample region via the
-/// caller's spectral cache) — `spectral_process_voice` only ever reads the
-/// resulting `Bin.frequency`/`magnitude`/`phase` as plain floats, so no downstream
-/// code needs to change.
+
+/// Consumes raw resampled PCM arrays and produces a fixed set of harmonic tracks.
+pub fn analyze_pcm_sample(
+    pcm_channels: Arc<[Arc<[f32]>]>,
+    original_sample_rate: u32,
+    config: &SpectralConfig,
+    fft_plans: &SpectralPlans,
+) -> AnalyzedSample {
+    let fft_size = config.fft_size;
+    let fft_step = config.fft_step;
+    let harmonic_count = config.max_peaks_per_frame;
+    let mag_res = config.magnitude_res;
+    let window_coeffs = fft_plans.window();
+    let channels_count = pcm_channels.len();
+    let bin_count = (fft_size / 2) + 1;
+    let max_len = pcm_channels.iter().map(|c| c.len()).max().unwrap_or(0);
+    let total_frames = if max_len <= fft_size {
+        1
+    } else {
+        ((max_len - fft_size) / fft_step) + 1
+    };
+    let goertzel_window_size = mag_res * 4; //windowing over 2x the magnitude time-resolution since magnitude shouldn't wonk about in the sub-ms range, if it does then something's probably already wrong
+    let total_goertzel_samples = if max_len < fft_size {
+        0
+    } else {
+        ((max_len - goertzel_window_size) / mag_res) + 1
+    };
+
+    //test stuff
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+    let call_id = CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+    eprintln!(
+        "[analyze_pcm_sample] call #{} — max_len={} samples ({:.2}s @ {}Hz), channels={}",
+        call_id,
+        max_len,
+        max_len as f32 / original_sample_rate as f32,
+        original_sample_rate,
+        pcm_channels.len()
+    );
+    //test stuff
+
+    let mut fft_buffer = vec![Complex::new(0.0f32, 0.0f32); fft_size];
+    let scratch_len = fft_plans.forward_plan.get_inplace_scratch_len();
+    let mut scratch_buffer = vec![Complex::new(0.0f32, 0.0f32); scratch_len];
+
+    let delta_f = original_sample_rate as f32 / fft_size as f32;
+    let magnitude_threshold_db = -60.0;
+    let semitone_ratio = 2f32.powf(1.0 / 12.0);
+    const MAG_FLOOR: f32 = 1e-12;
+
+    // --- Helper: run one frame's FFT on the mono-summed signal, writing into fft_buffer ---
+    let compute_frame_fft = |frame_idx: usize, fft_buffer: &mut [Complex<f32>], scratch_buffer: &mut [Complex<f32>]| {
+        let start_sample = frame_idx * fft_step;
+        fft_buffer.fill(Complex::new(0.0, 0.0));
+
+        if channels_count == 1 {
+            let pcm = &pcm_channels[0];
+            for i in 0..fft_size {
+                let pos = start_sample + i;
+                if pos < pcm.len() {
+                    fft_buffer[i].re = pcm[pos] * window_coeffs[i];
+                }
+            }
+        } else {
+            let inv_channels = 1.0 / channels_count as f32;
+            for i in 0..fft_size {
+                let pos = start_sample + i;
+                let mut sum = 0.0f32;
+                for ch in pcm_channels.iter() {
+                    if pos < ch.len() {
+                        sum += ch[pos];
+                    }
+                }
+                fft_buffer[i].re = sum * inv_channels * window_coeffs[i];
+            }
+        }
+
+        fft_plans.forward_plan.process_with_scratch(fft_buffer, scratch_buffer);
+    };
+
+    // ===================== PASS 1: harmonic detection on a representative frame =====================
+    //
+    // Pick a frame in early-to-mid sustain — skips the attack transient (where the
+    // spectrum is broadband/noisy and not representative of the note's harmonic
+    // series) and lands where the signal is strong and harmonically clean.
+    let representative_frame = (total_frames / 4).min(total_frames.saturating_sub(1));
+
+    compute_frame_fft(representative_frame, &mut fft_buffer, &mut scratch_buffer);
+
+    let mut magnitudes: Vec<f32> = vec![0.0; bin_count];
+    let mut log_magnitudes: Vec<f32> = vec![0.0; bin_count];
+    let mut phases: Vec<f32> = vec![0.0; bin_count];
+
+    for bin_idx in 0..bin_count {
+        let c = fft_buffer[bin_idx];
+        let mag = (c.re * c.re + c.im * c.im).sqrt();
+        magnitudes[bin_idx] = mag;
+        log_magnitudes[bin_idx] = mag.max(MAG_FLOOR).log10();
+        phases[bin_idx] = c.im.atan2(c.re);
+    }
+
+    let mut sorted_bins: Vec<usize> = (0..bin_count).collect();
+    sorted_bins.sort_unstable_by(|&a, &b| {
+        magnitudes[b].partial_cmp(&magnitudes[a]).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Selected (frequency, phase) pairs — magnitude from this pass is discarded;
+    // pass 2 derives the actual per-frame magnitude curve.
+    let mut selected: Vec<(f32, f32)> = Vec::with_capacity(harmonic_count); // (frequency, phase)
+
+    for &idx in sorted_bins.iter() {
+        if selected.len() >= harmonic_count {
+            break;
+        }
+
+        let mag = magnitudes[idx];
+        let mag_db = 20.0 * mag.max(MAG_FLOOR).log10();
+        if mag_db < magnitude_threshold_db {
+            break; // sorted descending — everything after this is also below floor
+        }
+
+        let raw_freq = idx as f32 * delta_f;
+        let min_dist = (raw_freq * (semitone_ratio - 1.0)).max(delta_f * 1.5);
+
+        if selected.iter().any(|&(f, _)| (f - raw_freq).abs() < min_dist) {
+            continue;
+        }
+
+        // Parabolic interpolation on log-magnitude for sub-bin frequency accuracy.
+        let (refined_freq, refined_phase) = if idx > 0 && idx < bin_count - 1 {
+            let alpha = log_magnitudes[idx - 1];
+            let beta = log_magnitudes[idx];
+            let gamma = log_magnitudes[idx + 1];
+            let denom = alpha - 2.0 * beta + gamma;
+
+            let p = if denom.abs() > f32::EPSILON {
+                (0.5 * (alpha - gamma) / denom).clamp(-0.5, 0.5)
+            } else {
+                0.0
+            };
+
+            let interp_freq = (idx as f32 + p) * delta_f;
+            let interp_phase = if p >= 0.0 {
+                phases[idx] * (1.0 - p) + phases[idx + 1] * p
+            } else {
+                phases[idx] * (1.0 + p) + phases[idx - 1] * (-p)
+            };
+
+            (interp_freq, interp_phase)
+        } else {
+            (raw_freq, phases[idx])
+        };
+
+        selected.push((refined_freq, refined_phase));
+    }
+
+    // Pad to exactly harmonic_count with inert entries (frequency=0, magnitude
+    // curve all zero) — spectral_process_voice's `magnitude <= 0.0` check skips
+    // these, same as the old zero-padded Bin scheme.
+    while selected.len() < harmonic_count {
+        selected.push((0.0, 0.0));
+    }
+
+    // Per-sample magnitude curve extraction
+    // For each harmonic's fixed frequency, compute its complex DFT value directly with Goertzel on each sample in the audio sample. This avoids the full per-frame FFT.
+    let mut magnitude_curves: Vec<Vec<f32>> = vec![vec![0.0; total_goertzel_samples]; harmonic_count];
+
+    let inv_channels = 1.0 / channels_count as f32;
+
+    // PRE-COMPUTE Goertzel coefficients for all harmonics ONCE
+    let mut harmonic_coeffs = Vec::with_capacity(harmonic_count);
+    for h in 0..harmonic_count {
+        let (freq, _) = selected[h];
+        if freq > 0.0 {
+            let omega = 2.0 * std::f32::consts::PI * freq / original_sample_rate as f32;
+            harmonic_coeffs.push(Some(2.0 * omega.cos()));
+        } else {
+            harmonic_coeffs.push(None);
+        }
+    }
+
+    let mut goertzel_windows = Vec::with_capacity(goertzel_window_size);
+    for n in 0..goertzel_window_size {
+        goertzel_windows.push(0.5 - 0.5 * (2.0 * std::f32::consts::PI * n as f32 / (goertzel_window_size - 1) as f32).cos()); //Hann window
+    }
+
+    for sample_idx in 0..total_goertzel_samples {
+        let start_sample = sample_idx * mag_res;
+
+        for h in 0..harmonic_count {
+            let coeff = match harmonic_coeffs[h] {
+                Some(c) => c,
+                None => continue,
+            };
+
+            let mut q1 = 0.0f32;
+            let mut q2 = 0.0f32;
+
+            for n in 0..goertzel_window_size {
+                let pos = start_sample + n;
+                let mut sample = 0.0f32;
+
+                if channels_count == 1 {
+                    if let Some(&v) = pcm_channels[0].get(pos) {
+                        sample = v;
+                    }
+                } else {
+                    for ch in pcm_channels.iter() {
+                        if let Some(&v) = ch.get(pos) {
+                            sample += v;
+                        }
+                    }
+                    sample *= inv_channels;
+                }
+
+                sample *= goertzel_windows[n];
+
+                let q0 = coeff * q1 - q2 + sample;
+                q2 = q1;
+                q1 = q0;
+            }
+
+            let mag_squared = q1 * q1 + q2 * q2 - q1 * q2 * coeff;
+        
+            // Guard against tiny negative floating-point anomalies before sqrt, 2.0 since IFFT produces unscaled peak mag of Complex*2/fft_size (so we also eliminate the need for normalisation)
+            let mag = if mag_squared > 0.0 { mag_squared.sqrt() * 2.0 / goertzel_window_size as f32 } else { 0.0 };
+
+            magnitude_curves[h][sample_idx] = mag;
+        }
+    }
+
+    let harmonics: Vec<HarmonicTrack> = (0..harmonic_count)
+        .map(|h| {
+            let (frequency, phase_at_origin) = selected[h];
+            HarmonicTrack {
+                frequency,
+                phase_at_origin,
+                magnitude_curve: Arc::from(std::mem::take(&mut magnitude_curves[h])),
+            }
+        })
+        .collect();
+
+    let result = AnalyzedSample {
+        harmonics: Arc::from(harmonics),
+        total_frames,
+        total_goertzel_samples,
+        harmonic_count,
+        channels_count,
+        original_sample_rate,
+        fft_size,
+        fft_step,
+    };
+    //test stuff
+    let curve_bytes: usize = result.harmonics.iter()
+    .map(|h| h.magnitude_curve.len() * std::mem::size_of::<f32>())
+    .sum();
+    let struct_bytes = result.harmonics.len() * std::mem::size_of::<HarmonicTrack>();
+    let bytes = curve_bytes + struct_bytes;
+    eprintln!(
+        "[analyze_pcm_sample] call #{} done — total_frames={}, top_n={}, bytes={:.2}MB",
+        call_id,
+        total_frames,
+        harmonic_count,
+        bytes as f32 / 1_000_000.0
+    );
+    result
+    //test stuff
+}
+
+//last hope please
 /*pub fn analyze_pcm_sample(
     pcm_channels: Arc<[Arc<[f32]>]>,
     original_sample_rate: u32,
@@ -97,247 +335,8 @@ impl AnalyzedSample {
     let scratch_len = fft_plans.forward_plan.get_inplace_scratch_len();
     let mut scratch_buffer = vec![Complex::new(0.0f32, 0.0f32); scratch_len];
 
-    // Pre-size the output exactly: channels * frames * top_n entries, all zero
-    // (zero magnitude == "empty slot"). We write into specific indices per frame
-    // rather than push()ing, which avoids reallocation and guarantees the fixed
-    // stride that get_frame_slice relies on.
-    let mut flat_peaks_accumulator: Vec<Bin> =
-        vec![Bin::default(); channels_count * total_frames * top_n];
-
-    // Reusable scratch buffers for the per-frame peak-picking pass — avoids
-    // allocating a Vec for every single frame of every sample.
-    // magnitudes/log_magnitudes/phases are indexed by raw bin index (0..bin_count)
-    // and are needed for parabolic interpolation, which reads neighbours of each
-    // selected peak by bin index.
-    let mut magnitudes: Vec<f32> = vec![0.0; bin_count];
-    let mut log_magnitudes: Vec<f32> = vec![0.0; bin_count];
-    let mut phases: Vec<f32> = vec![0.0; bin_count];
-    let mut sorted_bins: Vec<usize> = Vec::with_capacity(bin_count);
-    let mut selected_peaks: Vec<Bin> = Vec::with_capacity(top_n);
-
-    let delta_f = original_sample_rate as f32 / fft_size as f32;
-    //let magnitude_threshold_db = -60.0;
-    let semitone_ratio = 2f32.powf(1.0 / 12.0);
-
-    // Floor on magnitude for log10 to avoid -inf for exact-zero bins.
-    const MAG_FLOOR: f32 = 1e-12;
-
-    for (channel_idx, pcm_channel) in pcm_channels.iter().enumerate() {
-        let channel_stride = total_frames * top_n;
-
-        for frame_idx in 0..total_frames {
-            let start_sample = frame_idx * fft_step;
-            fft_buffer.fill(Complex::new(0.0, 0.0));
-            for i in 0..fft_size {
-                let sample_pos = start_sample + i;
-                if sample_pos < pcm_channel.len() {
-                    fft_buffer[i].re = pcm_channel[sample_pos] * window_coeffs[i];
-                }
-            }
-            fft_plans.forward_plan.process_with_scratch(&mut fft_buffer, &mut scratch_buffer);
-
-            // Compute magnitude, log-magnitude, and phase for every bin.
-            // log_magnitudes is needed for the parabolic fit; magnitudes/phases
-            // are used for selection and as fallback values at spectrum edges.
-            for bin_idx in 0..bin_count {
-                let c = fft_buffer[bin_idx];
-                let mag = (c.re * c.re + c.im * c.im).sqrt();
-                magnitudes[bin_idx] = mag;
-                log_magnitudes[bin_idx] = mag.max(MAG_FLOOR).log10();
-                phases[bin_idx] = c.im.atan2(c.re);
-            }
-
-            // Sort bin indices by magnitude descending so the strongest candidates
-            // are considered first.
-            sorted_bins.clear();
-            sorted_bins.extend(0..bin_count);
-            sorted_bins.sort_unstable_by(|&a, &b| {
-                magnitudes[b].partial_cmp(&magnitudes[a]).unwrap_or(std::cmp::Ordering::Equal)
-            });
-
-            // Greedily select up to top_n peaks: above the noise floor, and at
-            // least one semitone (or 1.5 bins, whichever is larger) away from
-            // every already-selected peak's frequency.
-            //
-            // The bin-resolution floor (1.5 * delta_f) matters at low frequencies:
-            // for a 4096-pt FFT at 44.1kHz, delta_f ~= 10.77 Hz, but a semitone at
-            // 55 Hz (A1) is only ~3.27 Hz wide — without the floor, multiple bins
-            // from the SAME spectral lobe would pass the spacing check and waste
-            // top_n slots on redundant samples of one harmonic.
-            selected_peaks.clear();
-            for &idx in sorted_bins.iter() {
-                if selected_peaks.len() >= top_n {
-                    break;
-                }
-
-                let mag = magnitudes[idx];
-                let mag_db = 20.0 * mag.max(MAG_FLOOR).log10();
-                let raw_freq = idx as f32 * delta_f;
-                let freq_khz = (raw_freq.max(1.0)) / 1000.0;
-                let dynamic_threshold = -60.0 - 20.0 * freq_khz.log10();
-
-                // relax below 1kHz by up to +12 dB
-                let dynamic_threshold = if raw_freq < 1000.0 {
-                    dynamic_threshold + 12.0 * (1.0 - (raw_freq / 1000.0))
-                } else {
-                    dynamic_threshold
-                };
-
-                // clamp extremes
-                let dynamic_threshold = dynamic_threshold.clamp(-110.0, -30.0);
-                if mag_db < dynamic_threshold {
-                    break;
-                }
-
-                let semitone_dist = raw_freq * (semitone_ratio - 1.0);
-
-                // make bin floor smaller at low freq, larger at high freq
-                let bin_floor_multiplier = if raw_freq < 200.0 {
-                    0.6 // allow closer bins at very low freq
-                } else if raw_freq < 800.0 {
-                    0.9
-                } else {
-                    1.5
-                };
-                let bin_floor = delta_f * bin_floor_multiplier;
-
-                let min_dist = semitone_dist.max(bin_floor);
-
-                if selected_peaks.iter().any(|p| (p.frequency - raw_freq).abs() < min_dist) {
-                    continue;
-                }
-
-                // --- Parabolic interpolation on log-magnitude ---
-                //
-                // Fits a parabola through (idx-1, idx, idx+1) in log-magnitude
-                // space and finds its vertex, giving a sub-bin offset `p` in
-                // [-0.5, 0.5]. This corrects the systematic bias where the true
-                // sinusoid frequency falls between bin centers but the raw FFT
-                // only reports energy at discrete bin frequencies.
-                //
-                // Edge bins (idx == 0 or idx == bin_count - 1) have no neighbour
-                // on one side and are left uninterpolated — these correspond to
-                // DC and Nyquist, which are not meaningful "peaks" for tonal
-                // content anyway.
-                let (refined_freq, refined_mag, refined_phase) =
-                    if idx > 0 && idx < bin_count - 1 {
-                        let alpha = log_magnitudes[idx - 1];
-                        let beta = log_magnitudes[idx];
-                        let gamma = log_magnitudes[idx + 1];
-
-                        let denom = alpha - 2.0 * beta + gamma;
-
-                        // denom == 0 means the three points are collinear (flat or
-                        // linear region) — the parabola is degenerate, so fall back
-                        // to the raw bin with no offset rather than dividing by zero.
-                        let p = if denom.abs() > f32::EPSILON {
-                            (0.5 * (alpha - gamma) / denom).clamp(-0.5, 0.5)
-                        } else {
-                            0.0
-                        };
-
-                        let interp_freq = (idx as f32 + p) * delta_f;
-
-                        // Refined log-magnitude at the parabola vertex, converted
-                        // back to linear magnitude.
-                        let interp_log_mag = beta - 0.25 * (alpha - gamma) * p;
-                        let interp_mag = 10f32.powf(interp_log_mag);
-
-                        // Phase: linearly interpolate toward whichever neighbour
-                        // the offset `p` points at, weighted by |p|. Phase varies
-                        // far more slowly than magnitude near a peak, so this is
-                        // a minor refinement compared to the frequency/magnitude
-                        // correction, but keeps phase consistent with the
-                        // corrected frequency.
-                        let interp_phase = if p >= 0.0 {
-                            phases[idx] * (1.0 - p) + phases[idx + 1] * p
-                        } else {
-                            phases[idx] * (1.0 + p) + phases[idx - 1] * (-p)
-                        };
-
-                        (interp_freq, interp_mag, interp_phase)
-                    } else {
-                        (raw_freq, mag, phases[idx])
-                    };
-
-                selected_peaks.push(Bin::new(refined_freq, refined_mag, refined_phase));
-            }
-
-            // Write into the fixed-stride output. Slots beyond selected_peaks.len()
-            // remain Bin::default() (magnitude == 0.0), which spectral_process_voice
-            // treats as "empty" and skips.
-            let frame_start = (channel_idx * channel_stride) + (frame_idx * top_n);
-            for (slot, peak) in selected_peaks.iter().enumerate() {
-                flat_peaks_accumulator[frame_start + slot] = *peak;
-            }
-        }
-    }
-
-    let result = AnalyzedSample {
-        flat_peaks: Arc::from(flat_peaks_accumulator),
-        total_frames,
-        peaks_per_frame: top_n,
-        channels_count,
-        original_sample_rate,
-        fft_size,
-        fft_step,
-    };
-    //test stuff
-    let bytes = result.flat_peaks.len() * std::mem::size_of::<Bin>();
-    eprintln!(
-        "[analyze_pcm_sample] call #{} done — total_frames={}, top_n={}, bytes={:.2}MB",
-        call_id,
-        total_frames,
-        top_n,
-        bytes as f32 / 1_000_000.0
-    );
-    //test stuff
-    result
-}*/
-
-
-//last hope please
-pub fn analyze_pcm_sample(
-    pcm_channels: Arc<[Arc<[f32]>]>,
-    original_sample_rate: u32,
-    config: &SpectralConfig,
-    fft_plans: &SpectralPlans,
-) -> AnalyzedSample {
-    let fft_size = config.fft_size;
-    let fft_step = config.fft_step;
-    let top_n = config.max_peaks_per_frame;
-    let window_coeffs = fft_plans.window();
-
-    let channels_count = pcm_channels.len();
-    let bin_count = (fft_size / 2) + 1;
-    let max_len = pcm_channels.iter().map(|c| c.len()).max().unwrap_or(0);
-
-    //test stuff
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
-    let call_id = CALL_COUNT.fetch_add(1, Ordering::Relaxed);
-    eprintln!(
-        "[analyze_pcm_sample] call #{} — max_len={} samples ({:.2}s @ {}Hz), channels={}",
-        call_id,
-        max_len,
-        max_len as f32 / original_sample_rate as f32,
-        original_sample_rate,
-        pcm_channels.len()
-    );
-    //test stuff
-
-    let total_frames = if max_len <= fft_size {
-        1
-    } else {
-        ((max_len - fft_size) / fft_step) + 1
-    };
-
-    let mut fft_buffer = vec![Complex::new(0.0f32, 0.0f32); fft_size];
-    let scratch_len = fft_plans.forward_plan.get_inplace_scratch_len();
-    let mut scratch_buffer = vec![Complex::new(0.0f32, 0.0f32); scratch_len];
-
     // Pre-size output
-    let mut flat_peaks_accumulator: Vec<Bin> =
+    let mut harmonics_accumulator: Vec<Bin> =
         vec![Bin::default(); channels_count * total_frames * top_n];
 
     // Reusable scratch buffers
@@ -397,9 +396,9 @@ pub fn analyze_pcm_sample(
             let base_threshold_db: f32 = -60.0;
             // Low-frequency boost (makes threshold more permissive below low_freq_cut)
             let low_freq_cut: f32 = 200.0;
-            let low_freq_boost_db: f32 = 15.0; // up to +12 dB at DC, tapering to 0 at low_freq_cut
+            let low_freq_boost_db: f32 = 12.0; // up to +12 dB at DC, tapering to 0 at low_freq_cut
             // Bin floor multipliers (vary with frequency)
-            let low_bin_floor_mult: f32 = 0.5;
+            let low_bin_floor_mult: f32 = 0.6;
             let mid_bin_floor_mult: f32 = 0.9;
             let high_bin_floor_mult: f32 = 1.5;
 
@@ -574,7 +573,7 @@ pub fn analyze_pcm_sample(
             // Write selected_peaks into the fixed-stride output
             let frame_start = (channel_idx * channel_stride) + (frame_idx * top_n);
             for (slot, peak) in selected_peaks.iter().enumerate() {
-                flat_peaks_accumulator[frame_start + slot] = *peak;
+                harmonics_accumulator[frame_start + slot] = *peak;
             }
             // Remaining slots are already defaulted to zero magnitude
 
@@ -591,7 +590,7 @@ pub fn analyze_pcm_sample(
     }
 
     let result = AnalyzedSample {
-        flat_peaks: Arc::from(flat_peaks_accumulator),
+        harmonics: Arc::from(harmonics_accumulator),
         total_frames,
         peaks_per_frame: top_n,
         channels_count,
@@ -600,7 +599,7 @@ pub fn analyze_pcm_sample(
         fft_step,
     };
     //test stuff
-    let bytes = result.flat_peaks.len() * std::mem::size_of::<Bin>();
+    let bytes = result.harmonics.len() * std::mem::size_of::<Bin>();
     eprintln!(
         "[analyze_pcm_sample] call #{} done — total_frames={}, top_n={}, bytes={:.2}MB",
         call_id,
@@ -610,4 +609,4 @@ pub fn analyze_pcm_sample(
     );
     //test stuff
     result
-}
+}*/

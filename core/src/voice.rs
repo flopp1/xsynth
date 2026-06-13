@@ -52,6 +52,7 @@ pub trait SpectralVoiceSampleGenerator {
         fft_size: usize,
         fft_step: usize,
         bin_count: usize,
+        magnitude_res: usize,
     );
     fn get_spectral_gain(&mut self, velocity: u8, fft_step: usize) -> f32;
     fn as_any(&self) -> &dyn std::any::Any;

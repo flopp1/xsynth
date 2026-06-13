@@ -96,6 +96,8 @@ pub extern "C" fn XSynth_GenDefault_SoundfontOptions() -> XSynth_SoundfontOption
             max_voices: 0, // 0 means unlimited
             enable_phase_fade_out: true,
             max_peaks_per_frame: 32,
+            magnitude_res: 48,
+
         },
     }
 }
@@ -152,6 +154,7 @@ pub unsafe extern "C" fn XSynth_Soundfont_LoadNew(
                     },
                     enable_phase_fade_out: options.spectral_config.enable_phase_fade_out,
                     max_peaks_per_frame: options.spectral_config.max_peaks_per_frame,
+                    magnitude_res: options.spectral_config.magnitude_res,
                 })
             } else {
                 None

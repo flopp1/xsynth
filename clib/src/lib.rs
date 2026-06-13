@@ -45,6 +45,7 @@ pub struct XSynth_SpectralConfig {
     pub max_voices: usize,
     pub enable_phase_fade_out: bool,
     pub max_peaks_per_frame: usize,
+    pub magnitude_res: usize
 }
 
 /// Generates the default values for the XSynth_StreamParams struct
