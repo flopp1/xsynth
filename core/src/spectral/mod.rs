@@ -12,9 +12,9 @@ pub use voice::SpectralVoice;
 //fundemental object representing one selected frequency from the peak frequencies in the sample
 #[derive(Clone, Debug)]
 pub struct HarmonicTrack {
-    pub frequency: f32,
-    pub phase_at_origin: f32,
+    pub frequency_curve: Arc<[f32]>,
     pub magnitude_curve: Arc<[f32]>,
+    pub phase_curve: Arc<[f32]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -22,6 +22,7 @@ pub struct SpectralVoice<T: Simd> {
     sample_rate: f32,
     current_volume: f32,
     current_pitch_bend: f32,
+    previous_phases: Vec<f32>,
     last_pitch_ratio: f32,
 }
 
@@ -36,7 +37,11 @@ impl<T: Simd> SpectralVoice<T> {
         let note_diff = trigger_note - root_note;
         let base_pitch_ratio = (note_diff as f32 / 12.0).exp2();
         let sample_rate_scaling = sample_data.original_sample_rate as f32 / sample_rate;
-        let initial_pitch_ratio = base_pitch_ratio * 1.0 * sample_rate_scaling; /* current_pitch_bend starts at 1.0 */ 
+        let initial_pitch_ratio = base_pitch_ratio * sample_rate_scaling;
+        let previous_phases: Vec<f32> = sample_data.harmonics.iter()
+            .map(|h| h.phase_curve.first().copied().unwrap_or(0.0))
+            .collect();
+
         Self {
             sample_data,
             envelope,
@@ -46,6 +51,7 @@ impl<T: Simd> SpectralVoice<T> {
             sample_rate,
             current_volume: 1.0,
             current_pitch_bend: 1.0,
+            previous_phases: previous_phases,
             last_pitch_ratio: initial_pitch_ratio,
         }
     }
@@ -62,18 +68,32 @@ impl<T: Simd> SpectralVoice<T> {
         self.sample_rate = new_rate;
     }
 
+    /// Linearly interpolates `curve` at the current (possibly fractional)
+    /// spectral-grid position.
+    #[inline]
+    fn interpolate(curve: &[f32], pos: f32) -> f32 {
+        let n = curve.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let lo = pos.floor() as usize;
+        if lo >= n - 1 {
+            return curve[n - 1];
+        }
+        let frac = pos - lo as f32;
+        curve[lo] * (1.0 - frac) + curve[lo + 1] * frac
+    }
+
     pub fn spectral_process_voice(
         &mut self,
         scratch: &mut Vec<(usize, Complex<f32>)>,
         fft_size: usize,
         fft_step: usize,
         bin_count: usize,
-        magnitude_res: usize,
     ) {
         scratch.clear();
 
-        let frame_idx = self.current_frame as usize;
-        if frame_idx >= self.sample_data.total_goertzel_samples {
+        if self.current_frame as usize >= self.sample_data.total_frames {
             return;
         }
 
@@ -83,20 +103,23 @@ impl<T: Simd> SpectralVoice<T> {
         let total_pitch_ratio = base_pitch_ratio * self.current_pitch_bend * sample_rate_scaling;
         self.last_pitch_ratio = total_pitch_ratio;
         let output_bin_hz = self.sample_rate / fft_size as f32;
+        let pos = self.current_frame;
 
-        for (_, harmonic) in self.sample_data.harmonics.iter().enumerate() {
-            let magnitude = harmonic.magnitude_curve[frame_idx];
-            // frequency == 0.0 marks an inert/padding harmonic
-            if harmonic.frequency <= 0.0 {
-                continue;
-            } 
+        for (h, harmonic) in self.sample_data.harmonics.iter().enumerate() {
+            // If the partial is currently inactive/silent, seamlessly feed it the 
+            // analyzed source phase curve so it births perfectly on time later.
+            let magnitude = Self::interpolate(&harmonic.magnitude_curve, pos);
             if magnitude <= 0.0 {
+                self.previous_phases[h] = Self::interpolate(&harmonic.phase_curve, pos);
                 continue;
             }
-            if frame_idx >= harmonic.magnitude_curve.len() {
+ 
+            let frequency = Self::interpolate(&harmonic.frequency_curve, pos);
+            if frequency <= 0.0 {
                 continue;
             }
-            let shifted_freq = harmonic.frequency * total_pitch_ratio;
+
+            let shifted_freq = frequency * total_pitch_ratio;
  
             let target_bin = shifted_freq / output_bin_hz;
             let lo_f = target_bin.floor();
@@ -107,19 +130,37 @@ impl<T: Simd> SpectralVoice<T> {
             let lo = lo_f as isize;
             let hi = lo + 1;
  
-            let current_time_samples = frame_idx * magnitude_res;
-            let phase = harmonic.phase_at_origin + 2.0 * std::f32::consts::PI * shifted_freq * (current_time_samples as f32 / self.sample_rate);
-            let (sin_p, cos_p) = phase.sin_cos();
-            let contrib = Complex::new(magnitude * cos_p, magnitude * sin_p);
+            let phase_increment =
+                2.0 * std::f32::consts::PI * shifted_freq * (fft_step as f32 / self.sample_rate);
+            self.previous_phases[h] = (self.previous_phases[h] + phase_increment) % (2.0 * std::f32::consts::PI);
+            let true_phase = self.previous_phases[h];
  
+            // RustFFT starts at time index 0. To prevent adjacent bins from being 180° out 
+            // of phase at the center of the frame, we subtract (PI * bin_index).
             if lo >= 0 && (lo as usize) < bin_count {
-                scratch.push((lo as usize, contrib * (1.0 - frac)));
+                let phase_lo = true_phase - std::f32::consts::PI * (lo as f32);
+                let (sin_l, cos_l) = phase_lo.sin_cos();
+                let contrib_lo = Complex::new(
+                    magnitude * (1.0 - frac) * cos_l, 
+                    magnitude * (1.0 - frac) * sin_l
+                );
+                scratch.push((lo as usize, contrib_lo));
             }
+            
             if hi >= 0 && (hi as usize) < bin_count {
-                scratch.push((hi as usize, contrib * frac));
+                let phase_hi = true_phase - std::f32::consts::PI * (hi as f32);
+                let (sin_h, cos_h) = phase_hi.sin_cos();
+                let contrib_hi = Complex::new(
+                    magnitude * frac * cos_h, 
+                    magnitude * frac * sin_h
+                );
+                scratch.push((hi as usize, contrib_hi));
             }
         }
-        self.current_frame += fft_step as f32 / magnitude_res as f32;
+        // Rather than stepping by exactly 1.0, scale frame speed by note differences 
+        // while counter-adjusting for structural host-vs-file sample rate changes.
+        let frame_increment = (base_pitch_ratio * self.current_pitch_bend) / sample_rate_scaling;
+        self.current_frame += frame_increment;
     }
 
     pub fn get_spectral_gain(&mut self, velocity: u8, fft_step: usize) -> f32 {
@@ -136,7 +177,7 @@ impl<T: Simd> SpectralVoice<T> {
 impl<T: Simd> VoiceGeneratorBase for SpectralVoice<T> {
     #[inline(always)]
     fn ended(&self) -> bool {
-        self.envelope.ended() || (self.current_frame as usize) >= self.sample_data.total_goertzel_samples
+        self.envelope.ended() || (self.current_frame as usize) >= self.sample_data.total_frames
     }
 
     #[inline(always)]
@@ -184,9 +225,8 @@ impl<T: Simd> SpectralVoiceSampleGenerator for SpectralVoice<T> {
         fft_size: usize,
         fft_step: usize,
         bin_count: usize,
-        magnitude_res: usize,
     ) {
-        self.spectral_process_voice(scratch, fft_size, fft_step, bin_count, magnitude_res);
+        self.spectral_process_voice(scratch, fft_size, fft_step, bin_count);
     }
 
     #[inline(always)]

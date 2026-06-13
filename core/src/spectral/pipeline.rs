@@ -67,7 +67,6 @@ impl<T: Simd> SpectralPipeline<T> {
     pub fn process_spectral_block(&mut self, active_voices: &mut [&mut dyn Voice]) {
         let fft_size = self.config.fft_size;
         let fft_step = self.config.fft_step;
-        let magnitude_res = self.config.magnitude_res;
         let bin_count = fft_size / 2 + 1;
 
         // Reset complex accumulator
@@ -86,7 +85,6 @@ impl<T: Simd> SpectralPipeline<T> {
                     fft_size,
                     fft_step,
                     bin_count,
-                    magnitude_res,
                 );
                 for (bin_idx, c) in self.template_scratch.iter() {
                     let scaled = Complex::new(c.re * gain, c.im * gain);
@@ -107,6 +105,14 @@ impl<T: Simd> SpectralPipeline<T> {
         self.ifft_buffer[bin_count - 1] = self.complex_accumulator[bin_count - 1];
 
         self.fft_plans.execute_inverse(&mut self.ifft_buffer);
+
+        // Query the plan directly for its window energy constraints
+        let normalization_scale = 1.0 / (fft_size as f32 * self.fft_plans.ola_gain_sum());
+        
+        for sample in self.ifft_buffer.iter_mut() {
+            sample.re *= normalization_scale;
+            sample.im *= normalization_scale;
+        }
 
         // Fused Extraction, Windowing, and Overlap-Add (normalisation unneeded since Goertzel's output is scaled correctly for IFFT already)
         self.fft_plans.window_and_overlap_add(&self.ifft_buffer, &mut self.overlap_buffer);

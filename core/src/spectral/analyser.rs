@@ -7,7 +7,6 @@ use super::{HarmonicTrack, SpectralConfig, SpectralPlans};
 pub struct AnalyzedSample {
     pub harmonics: Arc<[HarmonicTrack]>,
     pub total_frames: usize,
-    pub total_goertzel_samples: usize,
     pub harmonic_count: usize,
     pub channels_count: usize,
     pub original_sample_rate: u32,
@@ -51,6 +50,165 @@ fn cubic_maximize(y0: f32, y1: f32, y2: f32, y3: f32, max_val: &mut f32) -> f32 
     chosen
 }
 
+type FramePeaks = Vec<(f32, f32, f32)>;
+
+/// Runs cubic-interpolation peak detection on a single frame's power spectrum.
+fn detect_frame_peaks(
+    power: &[f32],
+    re: &[f32],
+    im: &[f32],
+    bin_count: usize,
+    half: usize,
+    delta_f: f32,
+    magnitude_threshold_power: f32,
+) -> FramePeaks {
+    let mut peaks = Vec::new();
+ 
+    if bin_count <= 4 || half < 4 {
+        return peaks;
+    }
+ 
+    let mut up = power[1] > power[0];
+    for bin in 2..(half - 1) {
+        let now_up = power[bin] > power[bin - 1];
+        if !now_up && up {
+            let leftbin = bin - 2;
+            let mut value_at_max = 0.0f32;
+            let offset = cubic_maximize(
+                power[leftbin],
+                power[leftbin + 1],
+                power[leftbin + 2],
+                power[leftbin + 3],
+                &mut value_at_max,
+            );
+ 
+            if offset.is_finite() && value_at_max.is_finite() && offset >= -0.5 && offset <= 2.5 {
+                if value_at_max < magnitude_threshold_power {
+                    up = now_up;
+                    continue;
+                }
+ 
+                let refined_bin = leftbin as f32 + offset;
+                let freq = refined_bin * delta_f;
+ 
+                let bin_floor = refined_bin.floor() as isize;
+                let phase = if bin_floor >= 0 && (bin_floor as usize) + 1 < bin_count {
+                    let b0 = bin_floor as usize;
+                    let frac = refined_bin - b0 as f32;
+                
+                    // 1. Compute the explicit phase angles for both adjacent bins
+                    let phase0 = im[b0].atan2(re[b0]);
+                    let phase1 = im[b0 + 1].atan2(re[b0 + 1]);
+                
+                    // 2. Find the shortest angular distance (delta) between the two phases
+                    let mut diff = phase1 - phase0;
+                    while diff > std::f32::consts::PI {
+                        diff -= 2.0 * std::f32::consts::PI;
+                    }
+                    while diff < -std::f32::consts::PI {
+                        diff += 2.0 * std::f32::consts::PI;
+                    }
+                
+                    // 3. Linearly interpolate along the perimeter of the circle
+                    let mut interp_phase = phase0 + frac * diff;
+                
+                    // 4. Ensure the final interpolated angle is bound between [-PI, PI]
+                    while interp_phase > std::f32::consts::PI {
+                        interp_phase -= 2.0 * std::f32::consts::PI;
+                    }
+                    while interp_phase < -std::f32::consts::PI {
+                        interp_phase += 2.0 * std::f32::consts::PI;
+                    }
+                
+                    interp_phase
+                } else {
+                    let idx = refined_bin.round().clamp(0.0, (bin_count - 1) as f32) as usize;
+                    im[idx].atan2(re[idx])
+                };
+                // value_at_max is power-domain; convert to linear magnitude.
+                peaks.push((freq, phase, value_at_max.max(0.0).sqrt()));
+            }
+        }
+        up = now_up;
+    }
+ 
+    peaks
+}
+
+/// A partial being tracked across frames.
+struct Track {
+    start_frame: usize,
+    /// (frequency, magnitude, phase) per frame, from start_frame onward.
+    frames: Vec<(f32, f32, f32)>,
+    /// Consecutive frames with no match — track dies if this exceeds max_gap.
+    silent_run: usize,
+    dead: bool,
+}
+ 
+impl Track {
+    fn new(start_frame: usize, freq: f32, mag: f32, phase: f32) -> Self {
+        Self {
+            start_frame,
+            frames: vec![(freq, mag, phase)],
+            silent_run: 0,
+            dead: false,
+        }
+    }
+ 
+    fn last(&self) -> (f32, f32, f32) {
+        *self.frames.last().unwrap()
+    }
+ 
+    fn extend(&mut self, freq: f32, mag: f32, phase: f32) {
+        if self.silent_run > 0 {
+            // The track was in a silent gap and fading out, but has now re-emerged!
+            // To prevent a pop/click step discontinuity, we retroactively overwrite 
+            // the artificial gap frames with a smooth linear transition.
+            let gap_len = self.silent_run;
+            let total_steps = gap_len + 1;
+            
+            // The last known genuine frame index sits right before the gap started
+            let start_idx = self.frames.len() - gap_len - 1;
+            let (start_freq, start_mag, start_phase) = self.frames[start_idx];
+            
+            for step in 1..=gap_len {
+                let t = step as f32 / total_steps as f32;
+                let idx = start_idx + step;
+                
+                // Linearly interpolate frequency and magnitude across the gap
+                self.frames[idx].0 = start_freq * (1.0 - t) + freq * t;
+                self.frames[idx].1 = start_mag * (1.0 - t) + mag * t;
+                
+                // Linearly interpolate the phase across the gap using wrap-aware logic
+                let mut diff = phase - start_phase;
+                while diff > std::f32::consts::PI { diff -= 2.0 * std::f32::consts::PI; }
+                while diff < -std::f32::consts::PI { diff += 2.0 * std::f32::consts::PI; }
+                
+                let mut interp_p = start_phase + t * diff;
+                while interp_p > std::f32::consts::PI { interp_p -= 2.0 * std::f32::consts::PI; }
+                while interp_p < -std::f32::consts::PI { interp_p += 2.0 * std::f32::consts::PI; }
+                
+                self.frames[idx].2 = interp_p;
+            }
+        }
+    
+        // Append the new true frame data normally and reset the counter
+        self.frames.push((freq, mag, phase));
+        self.silent_run = 0;
+    }
+ 
+    fn extend_silent(&mut self, max_gap: usize) {
+        let (last_freq, last_mag, last_phase) = self.last();
+        // Fade out over the silent run rather than instant cutoff.
+        let fade = (1.0 - (self.silent_run + 1) as f32 / (max_gap + 1) as f32).max(0.0);
+        self.frames.push((last_freq, last_mag * fade, last_phase));
+        self.silent_run += 1;
+        if self.silent_run > max_gap {
+            self.dead = true;
+        }
+    }
+}
+
 /// Consumes raw resampled PCM arrays and produces a fixed set of harmonic tracks.
 pub fn analyze_pcm_sample(
     pcm_channels: Arc<[Arc<[f32]>]>,
@@ -61,7 +219,6 @@ pub fn analyze_pcm_sample(
     let fft_size = config.fft_size;
     let fft_step = config.fft_step;
     let harmonic_count = config.max_peaks_per_frame;
-    let mag_res = config.magnitude_res;
     let window_coeffs = fft_plans.window();
     let channels_count = pcm_channels.len();
     let bin_count = (fft_size / 2) + 1;
@@ -71,13 +228,7 @@ pub fn analyze_pcm_sample(
     } else {
         ((max_len - fft_size) / fft_step) + 1
     };
-    let goertzel_window_size = mag_res * 4; //windowing over 2x the magnitude time-resolution since magnitude shouldn't wonk about in the sub-ms range, if it does then something's probably already wrong
-    let total_goertzel_samples = if max_len < fft_size {
-        0
-    } else {
-        ((max_len - goertzel_window_size) / mag_res) + 1
-    };
-
+    let half = fft_size / 2;
     //test stuff
     use std::sync::atomic::{AtomicUsize, Ordering};
     static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -96,7 +247,7 @@ pub fn analyze_pcm_sample(
     let scratch_len = fft_plans.forward_plan.get_inplace_scratch_len();
     let mut scratch_buffer = vec![Complex::new(0.0f32, 0.0f32); scratch_len];
     let delta_f = original_sample_rate as f32 / fft_size as f32;
-    //let semitone_ratio = 2f32.powf(1.0 / 12.0);
+    let magnitude_threshold_power = 10f32.powf(-60.0 / 10.0); // -60dB in power domain
 
     // --- Helper: run one frame's FFT on the mono-summed signal, writing into fft_buffer ---
     let compute_frame_fft = |frame_idx: usize, fft_buffer: &mut [Complex<f32>], scratch_buffer: &mut [Complex<f32>]| {
@@ -128,221 +279,213 @@ pub fn analyze_pcm_sample(
         fft_plans.forward_plan.process_with_scratch(fft_buffer, scratch_buffer);
     };
 
-    // Find the frame with maximum total power, after skipping an initial
-    // attack-exclusion window (e.g., first ~50ms).
-    let attack_exclude_seconds = 0.05; // ~50ms — tune if attacks are longer/shorter
-    let attack_exclude_frames = ((attack_exclude_seconds * original_sample_rate as f32) / fft_step as f32)
-        .ceil() as usize;
+    // ===================== Per-frame peak detection + tracking =====================
+    let semitone_ratio = 2f32.powf(1.0 / 12.0);
  
-    let scan_start = attack_exclude_frames.min(total_frames.saturating_sub(1));
+    // Frequency-matching tolerance for linking a frame's peak to an existing
+    // track: max of a fixed bin-based floor and a relative (semitone-scale)
+    // tolerance — wider tolerance at high frequencies where the same
+    // relative drift corresponds to a larger absolute Hz change.
+    let match_tolerance = |track_freq: f32| -> f32 {
+        (track_freq * (semitone_ratio - 1.0) * 0.5).max(delta_f * 1.5)
+    };
  
-    let mut best_frame = scan_start;
-    let mut best_power = f32::NEG_INFINITY;
+    // Consecutive silent frames tolerated before a track dies. ~5 frames at
+    // fft_step=2048/48000Hz =~ 213ms — survives a brief dip below threshold
+    // without prematurely killing a real partial.
+    let max_silent_gap = 5;
  
-    for frame_idx in scan_start..total_frames {
-        compute_frame_fft(frame_idx, &mut fft_buffer, &mut scratch_buffer);
-        let power: f32 = (0..bin_count)
-            .map(|b| {
-                let c = fft_buffer[b];
-                c.re * c.re + c.im * c.im
-            })
-            .sum();
-        if power > best_power {
-            best_power = power;
-            best_frame = frame_idx;
-        }
-    }
- 
-    compute_frame_fft(best_frame, &mut fft_buffer, &mut scratch_buffer);
- 
-    let half = fft_size / 2;
+    let mut tracks: Vec<Track> = Vec::new();
     let mut power: Vec<f32> = vec![0.0; bin_count];
     let mut re: Vec<f32> = vec![0.0; bin_count];
     let mut im: Vec<f32> = vec![0.0; bin_count];
+    let mut target_peak = 0.0f32;
  
-    for bin_idx in 0..bin_count {
-        let c = fft_buffer[bin_idx];
-        power[bin_idx] = c.re * c.re + c.im * c.im;
-        re[bin_idx] = c.re;
-        im[bin_idx] = c.im;
-    }
+    for frame_idx in 0..total_frames {
+        compute_frame_fft(frame_idx, &mut fft_buffer, &mut scratch_buffer);
+        for b in 0..bin_count {
+            let c = fft_buffer[b];
+            power[b] = c.re * c.re + c.im * c.im;
+            re[b] = c.re;
+            im[b] = c.im;
+            let mag = power[b].sqrt();
+            if mag > target_peak {
+                target_peak = mag;
+            }
+        }
  
-    let magnitude_threshold = 10f32.powf(-60.0 / 10.0); // -60dB threshold
+        let mut frame_peaks = detect_frame_peaks(
+            &power, &re, &im, bin_count, half, delta_f, magnitude_threshold_power,
+        );
  
-    // Peak detection on raw (unweighted) power 
-    let mut peaks: Vec<(f32, f32, f32)> = Vec::new(); // (freq_hz, phase_rad, magnitude_linear)
+        // Strong peaks get matched/birthed before weak ones compete for slots.
+        frame_peaks.sort_unstable_by(|a, b| f32::total_cmp(&b.2, &a.2));
  
-    if bin_count > 4 {
-        let mut up = power[1] > power[0];
-        // Audacity's loop: bin = 3 .. half-1
-        for bin in 3..(half - 1) {
-            let now_up = power[bin] > power[bin - 1];
-            if !now_up && up {
-                let leftbin = bin - 2;
-                let mut value_at_max = 0.0f32;
-                let offset = cubic_maximize(
-                    power[leftbin],
-                    power[leftbin + 1],
-                    power[leftbin + 2],
-                    power[leftbin + 3],
-                    &mut value_at_max,
-                );
+        let mut matched = vec![false; frame_peaks.len()];
  
-                if offset.is_finite() && value_at_max.is_finite() && offset >= -0.5 {
-                    if value_at_max < magnitude_threshold {
-                        up = now_up;
-                        continue;
-                    }
+        // --- Match active tracks to this frame's peaks ---
+        for track in tracks.iter_mut() {
+            if track.dead {
+                continue;
+            }
  
-                    let refined_bin = leftbin as f32 + offset;
-                    let freq = refined_bin * delta_f;
+            let (last_freq, _, _) = track.last();
+            let tol = match_tolerance(last_freq);
  
-                    // Phase via linear interpolation of the complex spectrum around the
-                    // refined (sub-bin) peak position.
-                    let bin_floor = refined_bin.floor() as isize;
-                    let phase = if bin_floor >= 0 && (bin_floor as usize) + 1 < bin_count {
-                        let b0 = bin_floor as usize;
-                        let frac = refined_bin - b0 as f32;
-                        let interp_re = re[b0] * (1.0 - frac) + re[b0 + 1] * frac;
-                        let interp_im = im[b0] * (1.0 - frac) + im[b0 + 1] * frac;
-                        interp_im.atan2(interp_re)
-                    } else {
-                        let idx = refined_bin.round().clamp(0.0, (bin_count - 1) as f32) as usize;
-                        im[idx].atan2(re[idx])
-                    };
- 
-                    peaks.push((freq, phase, value_at_max));
+            let mut best_idx: Option<usize> = None;
+            let mut best_dist = f32::INFINITY;
+            for (i, &(freq, _, _)) in frame_peaks.iter().enumerate() {
+                if matched[i] {
+                    continue;
+                }
+                let dist = (freq - last_freq).abs();
+                if dist < tol && dist < best_dist {
+                    best_dist = dist;
+                    best_idx = Some(i);
                 }
             }
-            up = now_up;
+ 
+            match best_idx {
+                Some(i) => {
+                    let (freq, phase, mag) = frame_peaks[i];
+                    track.extend(freq, mag, phase);
+                    matched[i] = true;
+                }
+                None => {
+                    track.extend_silent(max_silent_gap);
+                }
+            }
+        }
+ 
+        // --- Birth new tracks for unmatched candidates, up to harmonic_count active ---
+        let active_count = tracks.iter().filter(|t| !t.dead).count();
+        let mut free_slots = harmonic_count.saturating_sub(active_count);
+ 
+        if free_slots > 0 {
+            for (i, &(freq, phase, mag)) in frame_peaks.iter().enumerate() {
+                if matched[i] {
+                    continue;
+                }
+                if free_slots == 0 {
+                    break;
+                }
+                tracks.push(Track::new(frame_idx, freq, mag, phase));
+                free_slots -= 1;
+            }
         }
     }
-    let eps = delta_f.max(1.0);
-    let bias_exponent = 0.6_f32; // tune 0.3..1.0 — higher = stronger low-frequency bias
  
-    let weighted_magnitude = |freq: f32, mag: f32| -> f32 {
-        let weight = 1.0 / (freq + eps).powf(bias_exponent);
-        mag * weight
-    };
-
-    peaks.sort_unstable_by(|a, b| {
-        let wa = weighted_magnitude(a.0, a.2);
-        let wb = weighted_magnitude(b.0, b.2);
-        f32::total_cmp(&wb, &wa)
+    // Select top harmonic_count tracks by total energy
+    tracks.sort_unstable_by(|a, b| {
+        let ea: f32 = a.frames.iter().map(|&(_, m, _)| m).sum();
+        let eb: f32 = b.frames.iter().map(|&(_, m, _)| m).sum();
+        f32::total_cmp(&eb, &ea)
     });
 
-    let semitone_ratio = 2f32.powf(1.0 / 12.0);
- 
-    let mut selected: Vec<(f32, f32)> = Vec::with_capacity(harmonic_count); // (frequency, phase)
- 
-    for &(freq, phase, _weighted_mag) in peaks.iter() {
-        if selected.len() >= harmonic_count {
-            break;
-        }
- 
-        let min_dist = (freq * (semitone_ratio - 1.0)).max(delta_f * 1.5);
- 
-        if selected.iter().any(|&(f, _)| (f - freq).abs() < min_dist) {
-            continue;
-        }
- 
-        selected.push((freq, phase));
-    }
+    //tracks.sort_unstable_by(|a, b| {
+    //    let ea = a.frames.iter().map(|&(_, m, _)| m).fold(0.0f32, f32::max);
+    //    let eb = b.frames.iter().map(|&(_, m, _)| m).fold(0.0f32, f32::max);
+    //    f32::total_cmp(&eb, &ea)
+    //});
 
-    // Pad to harmonic_count with inert entries
-    while selected.len() < harmonic_count {
-        selected.push((0.0, 0.0));
-    }
+    tracks.truncate(harmonic_count);
 
-    // Per-sample magnitude curve extraction
-    // For each harmonic's fixed frequency, compute its complex DFT value directly with Goertzel on each sample in the audio sample. This avoids the full per-frame FFT.
-    let mut magnitude_curves: Vec<Vec<f32>> = vec![vec![0.0; total_goertzel_samples]; harmonic_count];
-
-    let inv_channels = 1.0 / channels_count as f32;
-
-    // PRE-COMPUTE Goertzel coefficients for all harmonics ONCE
-    let mut harmonic_coeffs = Vec::with_capacity(harmonic_count);
-    for h in 0..harmonic_count {
-        let (freq, _) = selected[h];
-        if freq > 0.0 {
-            let omega = 2.0 * std::f32::consts::PI * freq / original_sample_rate as f32;
-            harmonic_coeffs.push(Some(2.0 * omega.cos()));
+    let per_frame_sums: Vec<f32> = (0..total_frames)
+    .map(|f| tracks.iter().map(|t| {
+        if f >= t.start_frame {
+            let idx = f - t.start_frame;
+            if idx < t.frames.len() { t.frames[idx].1 } else { 0.0 }
         } else {
-            harmonic_coeffs.push(None);
+            0.0
+        }
+    }).sum::<f32>())
+    .collect();
+
+    // Use a robust statistic (RMS) to avoid tiny single-frame denominators
+    let _rms = if per_frame_sums.is_empty() {
+        0.0
+    } else {
+        let s: f32 = per_frame_sums.iter().map(|v| v * v).sum();
+        (s / per_frame_sums.len() as f32).sqrt()
+    };
+
+    // target_peak was computed earlier during analysis; if not, compute a conservative target
+    let target_peak = target_peak.max(1e-9_f32); // ensure nonzero
+
+    // Convert dB threshold or clamp scale to avoid runaway amplification
+    let max_scale = 10.0_f32;      // tune: 4..16 typical
+    let min_scale = 0.1_f32;       // avoid extreme attenuation
+    let floor = 1e-6_f32;          // floor for tiny RMS
+//
+    //let denom = if rms > floor { rms } else { floor };
+    //let scale = (target_peak / denom).clamp(min_scale, max_scale);
+
+    // Optionally, if you prefer peak-based scaling, use:
+    let reconstructed_peak = per_frame_sums.iter().cloned().fold(0.0_f32, f32::max);
+    let scale = if reconstructed_peak > floor { (target_peak / reconstructed_peak).clamp(min_scale, max_scale) } else { 1.0 };
+
+    // Apply scale to each track's stored magnitudes (in-place)
+    for track in tracks.iter_mut() {
+        for frame in track.frames.iter_mut() {
+            frame.1 *= scale; // frame is (freq, mag, phase) — mag is amplitude
         }
     }
 
-    let mut goertzel_windows = Vec::with_capacity(goertzel_window_size);
-    for n in 0..goertzel_window_size {
-        goertzel_windows.push(0.5 - 0.5 * (2.0 * std::f32::consts::PI * n as f32 / (goertzel_window_size - 1) as f32).cos()); //Hann window
+    // Now apply birth fade (after scaling) while `track` is still in scope.
+    // Use a slightly longer/smoother fade to avoid audible artifacts.
+    const BIRTH_FADE_FRAMES: usize = 16; // increase from 2 to 4 for smoother ramp
+    for track in tracks.iter_mut() {
+        let birth_len = BIRTH_FADE_FRAMES.min(track.frames.len());
+        for i in 0..birth_len {
+            // fade factor: smooth cosine ramp from 0 -> 1
+            let t = (i + 1) as f32 / (BIRTH_FADE_FRAMES + 1) as f32;
+            let fade = 0.5 - 0.5 * (std::f32::consts::PI * (1.0 - t)).cos(); // gentle curve
+            track.frames[i].1 *= fade;
+        }
     }
 
-    for sample_idx in 0..total_goertzel_samples {
-        let start_sample = sample_idx * mag_res;
-
-        for h in 0..harmonic_count {
-            let coeff = match harmonic_coeffs[h] {
-                Some(c) => c,
-                None => continue,
-            };
-
-            let mut q1 = 0.0f32;
-            let mut q2 = 0.0f32;
-
-            for n in 0..goertzel_window_size {
-                let pos = start_sample + n;
-                let mut sample = 0.0f32;
-
-                if channels_count == 1 {
-                    if let Some(&v) = pcm_channels[0].get(pos) {
-                        sample = v;
-                    }
-                } else {
-                    for ch in pcm_channels.iter() {
-                        if let Some(&v) = ch.get(pos) {
-                            sample += v;
-                        }
-                    }
-                    sample *= inv_channels;
+    // Finalize
+    let mut harmonics: Vec<HarmonicTrack> = tracks.into_iter()
+        .map(|track| {
+            let mut freq_curve = vec![0.0f32; total_frames];
+            let mut mag_curve = vec![0.0f32; total_frames];
+            let mut phase_curve = vec![0.0f32; total_frames];
+ 
+            for (i, &(f, m, p)) in track.frames.iter().enumerate() {
+                let frame = track.start_frame + i;
+                if frame < total_frames {
+                    freq_curve[frame] = f;
+                    mag_curve[frame] = m;
+                    phase_curve[frame] = p;
                 }
-
-                sample *= goertzel_windows[n];
-
-                let q0 = coeff * q1 - q2 + sample;
-                q2 = q1;
-                q1 = q0;
             }
-
-            let mag_squared = q1 * q1 + q2 * q2 - q1 * q2 * coeff;
-        
-            // Guard against tiny negative floating-point anomalies before sqrt
-            let mag = if mag_squared > 0.0 { mag_squared.sqrt() / goertzel_window_size as f32 / 4.0 } else { 0.0 };
-
-            magnitude_curves[h][sample_idx] = mag;
-        }
-    }
-
-    let harmonics: Vec<HarmonicTrack> = (0..harmonic_count)
-        .map(|h| {
-            let (frequency, phase_at_origin) = selected[h];
             HarmonicTrack {
-                frequency,
-                phase_at_origin,
-                magnitude_curve: Arc::from(std::mem::take(&mut magnitude_curves[h])),
+                frequency_curve: Arc::from(freq_curve),
+                magnitude_curve: Arc::from(mag_curve),
+                phase_curve: Arc::from(phase_curve),
             }
         })
         .collect();
 
+    // Pad with inert tracks if fewer than harmonic_count were found.
+    while harmonics.len() < harmonic_count {
+        harmonics.push(HarmonicTrack {
+            frequency_curve: Arc::from(vec![0.0f32; total_frames]),
+            magnitude_curve: Arc::from(vec![0.0f32; total_frames]),
+            phase_curve: Arc::from(vec![0.0f32; total_frames]),
+        });
+    }
+
     let result = AnalyzedSample {
         harmonics: Arc::from(harmonics),
         total_frames,
-        total_goertzel_samples,
         harmonic_count,
         channels_count,
         original_sample_rate,
         fft_size,
         fft_step,
     };
+
     //test stuff
     let curve_bytes: usize = result.harmonics.iter()
     .map(|h| h.magnitude_curve.len() * std::mem::size_of::<f32>())

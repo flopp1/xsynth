@@ -7,6 +7,7 @@ pub struct SpectralPlans {
     fft_size: usize,
     fft_step: usize,
     window: Vec<f32>,
+    ola_gain_sum: f32,
 }
 
 impl SpectralPlans {
@@ -18,12 +19,18 @@ impl SpectralPlans {
 
         // Pre-calculate Hanning window for the requested size
         let mut window = Vec::with_capacity(fft_size);
+        let mut window_energy_sum = 0.0;
         for i in 0..fft_size {
             let val = 0.5
                 * (1.0
                     - f32::cos((2.0 * std::f32::consts::PI * i as f32) / (fft_size as f32 - 1.0)));
             window.push(val);
+            // Track the squared energy because the window is applied twice (Analysis * Synthesis)
+            window_energy_sum += val * val; 
         }
+
+        // The total gain at any given output sample is the window's total energy divided by the hop step
+        let ola_gain_sum = window_energy_sum / fft_step as f32;
 
         Self {
             forward_plan,
@@ -31,6 +38,7 @@ impl SpectralPlans {
             fft_size,
             fft_step,
             window,
+            ola_gain_sum,
         }
     }
 
@@ -60,6 +68,11 @@ impl SpectralPlans {
     #[inline(always)]
     pub fn execute_inverse(&self, buffer: &mut [Complex<f32>]) {
         self.inverse_plan.process(buffer);
+    }
+
+    #[inline(always)]
+    pub fn ola_gain_sum(&self) -> f32 {
+        self.ola_gain_sum
     }
 
     /// Extracts the real part from the IFFT buffer, applies the Hanning window, and accumulates directly into the overlap buffer in a single vectorized pass.
